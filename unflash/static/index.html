@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unflash</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">⚡̶ Unflash</div>
+  <button id="btnHome" title="Back to the start screen with the workflow guide">🏠 Guide</button>
+  <button id="btnOpen" class="primary">Open video…</button>
+  <div id="videoInfo" class="video-info"></div>
+  <div class="spacer"></div>
+  <label class="profile-label" title="Notify + beep when an operation takes longer than this many minutes">🔔≥<input type="number" id="notifyMin" min="0" step="1" style="width:3.2em"> min</label>
+  <label class="profile-label">Profile
+    <select id="profileSel">
+      <option value="strict">Strict (default)</option>
+      <option value="wcag">Exact WCAG</option>
+    </select>
+  </label>
+  <button id="btnScan" disabled>Scan for flashes</button>
+  <button id="btnExport" disabled>Export…</button>
+</header>
+
+<div id="jobbar" class="jobbar hidden">
+  <div class="jobname" id="jobName"></div>
+  <div class="progress"><div class="bar" id="jobBar"></div></div>
+  <div id="jobMsg" class="jobmsg"></div>
+  <button id="btnCancelJob" class="small danger">cancel</button>
+</div>
+
+<div id="timelineWrap" class="timeline-wrap hidden">
+  <canvas id="timeline" height="56"></canvas>
+  <div class="timeline-row">
+    <div class="timeline-hint">Whole-video flash intensity — orange/red = general flashes, magenta = red flashes. Numbered boxes are work sections (click to open). Drag on empty timeline to add a section, or type times:</div>
+    <span class="addsec">
+      <input type="text" id="addStart" placeholder="start (e.g. 1:23.5)" size="12">
+      <input type="text" id="addEnd" placeholder="end" size="12">
+      <button id="btnAddSection" class="small">add section</button>
+    </span>
+  </div>
+</div>
+
+<main>
+  <aside id="sections">
+    <div class="side-head">
+      <h2>Sections</h2>
+      <button id="btnPrepareAll" class="small" title="Prepare every section that isn't prepared yet">prepare all</button>
+      <button id="btnRenderAll" class="small" title="Render every prepared section at full resolution, skipping ones already rendered with current edits">render all</button>
+    </div>
+    <div id="sectionList" class="section-list"></div>
+  </aside>
+
+  <section id="workspace" class="hidden">
+    <div class="ws-head">
+      <h2 id="wsTitle"></h2>
+      <span id="wsVerdict" class="verdict"></span>
+      <div class="spacer"></div>
+      <span class="range-edit">
+        <input type="text" id="secStart" size="10" title="section start">
+        –
+        <input type="text" id="secEnd" size="10" title="section end">
+        <button id="btnApplyRange" class="small" title="Change this section's time range (resets preparation and edits)">apply range</button>
+      </span>
+      <button id="btnDeleteSection" class="small danger">delete section</button>
+    </div>
+    <div id="wsWarnings" class="ws-warnings hidden"></div>
+
+    <div id="wsUnprepared" class="panel hidden">
+      <p>This section hasn't been prepared yet. Preparing analyzes every frame, builds a proxy video and thumbnails.</p>
+      <button id="btnPrepare" class="primary">Prepare section</button>
+    </div>
+
+    <div id="wsBody" class="hidden">
+      <div class="toolbar">
+        <span class="group">
+          <button id="btnSuggestLight" title="Propose removals that hold the brighter frames">Suggest: keep light</button>
+          <button id="btnSuggestDark" title="Propose removals that hold the darker frames">Suggest: keep dark</button>
+          <label class="sel-only" title="Restrict the suggestion's removals to the currently selected frames"><input type="checkbox" id="suggestSelOnly"> selection only</label>
+        </span>
+        <span class="group">
+          <button id="btnCheck" class="accent" title="Instantly simulate current edits through the detector (no render)">Check safety</button>
+          <button id="btnPreview" title="Render a low-res preview with edits applied, then verify it">Preview render</button>
+          <button id="btnRender" title="Render this section at full resolution, then verify it — required before export">Render full-res</button>
+        </span>
+        <span class="group">
+          <button id="btnClearEdits" class="small">clear all marks</button>
+        </span>
+      </div>
+
+      <div class="players">
+        <div class="player-box">
+          <div class="player-head">
+            <span id="playerLabel"></span>
+            <label class="dim-toggle"><input type="checkbox" id="dimToggle" checked> dim player</label>
+            <select id="playerSource">
+              <option value="proxy">proxy (unedited)</option>
+              <option value="preview">preview (edited)</option>
+              <option value="render">full render (edited)</option>
+            </select>
+          </div>
+          <div class="player-warning" id="playerWarning"></div>
+          <video id="player" controls preload="metadata"></video>
+        </div>
+        <div class="chart-box">
+          <canvas id="chart" height="180"></canvas>
+          <div class="chart-hint">Luminance (line) and flash transition area (bars: ▲ up ▼ down, magenta = red-flash). Click to jump to frame. Shaded = removed, blue = extended.</div>
+        </div>
+      </div>
+
+      <div class="grid-head">
+        <h3>Frames <span id="frameCount"></span></h3>
+        <div class="legend">
+          <span class="chip removed">removed</span>
+          <span class="chip extended">extended</span>
+          <span class="chip flagged">in flash event</span>
+          <span class="chip flagged-red">in red-flash event</span>
+          <span class="chip selected">selected</span>
+        </div>
+        <div class="grid-actions">
+          <button id="btnMarkRemoved" class="small">R — toggle removed</button>
+          <button id="btnMarkExtended" class="small">E — toggle extended</button>
+          <button id="btnUnmark" class="small">U — unmark</button>
+          <button id="btnSelectFlagged" class="small" title="Select frames in the original analysis' flash events">select flagged</button>
+          <button id="btnSelectUnsafe" class="small danger hidden" title="Select the frames inside the failing windows of the last safety check">select unsafe frames</button>
+        </div>
+      </div>
+      <div class="grid-hint">Click selects · shift-click selects the run between clicks · with <b>Caps Lock on</b>, shift-click selects a rectangle instead · ctrl-click adds/removes · Esc clears.</div>
+      <div id="frameGrid" class="frame-grid" tabindex="0"></div>
+    </div>
+  </section>
+
+  <section id="welcome">
+    <h1>Unflash</h1>
+    <p>Detect and repair photosensitive-hazard flashing in videos.</p>
+    <ol>
+      <li>Open a video and <b>Scan</b> it — problem sections are found automatically (WCAG 2.x general-flash, red-flash and extended-flash analysis). You can also add sections by dragging on the timeline or typing timestamps.</li>
+      <li>Open a section and <b>Prepare</b> it (proxy + thumbnails + per-frame analysis) — or use <b>prepare all</b> in the sidebar.</li>
+      <li>Use <b>Suggest</b> (keep-light or keep-dark, optionally restricted to your selection) or mark frames yourself: removed frames are replaced by the last kept frame; extended frames linger for 1&nbsp;s with silent audio.</li>
+      <li><b>Check safety</b> instantly, then <b>Preview render</b> to watch the result. If a check fails, <b>select unsafe frames</b> shows you exactly where the remaining problems are.</li>
+      <li><b>Render full-res</b> — this must be done for <b>every</b> section before exporting (<b>render all</b> in the sidebar does them all, skipping up-to-date ones). Sections whose edits changed after rendering are flagged <i>render stale</i>; re-render them.</li>
+      <li><b>Export</b> stitches the rendered sections back into the untouched video, then <b>Verify</b> re-scans the final file.</li>
+    </ol>
+    <p class="disclaimer">This tool reduces risk; it cannot guarantee safety. It does not detect hazardous static patterns (e.g.&nbsp;fine stripes), and individual sensitivity varies — review flagged sections yourself before sharing.</p>
+  </section>
+</main>
+
+<div id="exportModal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Export final video</h2>
+    <p id="exportSummary"></p>
+    <label>Mode
+      <select id="exportMode">
+        <option value="reencode">Re-encode everything (robust, slower)</option>
+        <option value="smartcut">Smart-cut (fast; copies untouched spans, h264 sources only)</option>
+      </select>
+    </label>
+    <div class="modal-actions">
+      <button id="btnDoExport" class="primary">Choose output & export</button>
+      <button id="btnVerifyExport">Verify exported file</button>
+      <button id="btnCloseExport" class="small">close</button>
+    </div>
+    <div id="exportResult"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

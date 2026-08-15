@@ -1,0 +1,117 @@
+# Unflash
+
+Detect and repair photosensitive-hazard flashing in videos, while keeping the
+visual information that naive "flash removal" filters destroy. Removed frames
+are replaced by the last kept frame (timing is untouched), and important
+flash frames can be *extended* — held for 1 second with silent audio — so
+nothing informational is lost.
+
+## Setup
+
+```
+pip install -r requirements.txt
+```
+
+Requires `ffmpeg` and `ffprobe` on PATH.
+
+## Run
+
+```
+run_unflash.bat
+```
+
+A browser page opens at http://127.0.0.1:8765/. Everything runs locally.
+
+## Workflow
+
+1. **Open video** — a work folder `<name>.unflash/` is created next to it;
+   all state (sections, edits, proxies, renders) persists there, so you can
+   close and resume anytime.
+2. **Scan for flashes** — a WCAG 2.x / PEAT-style detector (general flash,
+   red flash, extended-flash warning) runs over the whole video and produces
+   numbered work *sections* around each problem, snapped to keyframes. The
+   timeline shows a flash-intensity heatmap. You can also add sections by
+   dragging on the timeline or typing exact timestamps, and change a
+   section's range from its workspace (this resets its preparation).
+3. **Prepare a section** (or **prepare all** in the sidebar) — analyzes every
+   frame, caches analysis frames, builds a 540p proxy and per-frame
+   thumbnails.
+4. **Edit** — mark frames *removed* (red, replaced by last kept frame) or
+   *extended* (blue, held 1 s with silence). Click to select; shift-click
+   selects the run between clicks; with **Caps Lock on**, shift-click selects
+   a geometric rectangle in the grid instead (no key-holding needed);
+   ctrl-click adds/removes. Keys **R** / **E** / **U** apply to the
+   selection. **Suggest: keep light / keep dark** proposes a removal set,
+   verifies it through the detector, and escalates until the section passes —
+   tick *selection only* to confine its removals to the frames you selected.
+   If the very first frame is removed, it backfills from the first kept
+   frame.
+5. **Check safety** — instant verdict: your current edits are simulated
+   through the detector without rendering anything. If it fails, **select
+   unsafe frames** highlights exactly the frames inside the failing
+   window(s). Frames in flash events carry a corner dot: yellow for general
+   flashes, magenta for red flashes.
+6. **Preview render** — applies edits at proxy resolution (decoded from the
+   original, so frames always line up) and re-verifies the rendered file.
+7. **Render full-res** — **required for every section before export** (or
+   use **render all** in the sidebar, which skips sections already rendered
+   with their current edits). If you edit a section after rendering it, it
+   gets a *render stale ⚠* badge — re-render it, or export will warn.
+8. **Export** — stitches rendered sections with the untouched spans.
+   *Re-encode* mode is robust; *smart-cut* stream-copies untouched spans
+   (fast, h264 sources only). The export self-checks that the output's
+   timing matches the sum of its parts. Then **Verify exported file**
+   re-scans the final output with your selected detector profile.
+
+The 🔔 field in the header sets a threshold (minutes): any operation that
+takes longer triggers a beep + desktop notification when it finishes.
+
+## CLI
+
+```
+python -m unflash.cli analyze VIDEO [--start S --duration D] [--wcag]
+python -m unflash.cli scan VIDEO [--wcag]
+```
+
+## Detection details
+
+Implements the WCAG 2.x / PEAT definitions: relative luminance with sRGB
+linearization; a transition qualifies when a pixel's accumulated monotonic
+luminance change is >= 10% of max luminance with the darker state < 0.80
+(red: |Δ(R−G−B)×320| > 20 **and** the pixel enters or leaves the saturated
+state R/(R+G+B) >= 0.8 — brightness wobble inside a continuously-red scene is
+not a red flash; red↔dark flashing is caught by the general luminance
+criterion). A pixel *flashes*
+when it completes a pair of opposing qualifying transitions within a second
+(so motion — an edge sweeping the screen — does not count, but a flash
+ramping over several frames does). Content fails when pixels flashing more
+than 3 times per second (WCAG; strict profile: 2) cover at least a quarter
+(strict: a fifth) of any 341×256 window with the content viewed at 1024×768.
+Calibrated against synthetic patterns: exactly 3 flashes/s passes WCAG,
+4 fails; 15% window area passes, 35% fails; bright-only flicker (both states
+above 0.80) passes; jittered multi-frame ramps fail; moving objects pass.
+
+The default **strict** profile is tighter than WCAG because photosensitive-
+migraine thresholds are lower than seizure thresholds; the exact-WCAG profile
+is selectable in the header and is used by all checks/verifications.
+
+## Messy real-world files
+
+Stream VODs and clipped videos often have broken timestamps: negative start
+times, variable frame rate, audio offset from video, or multi-second pts
+jumps that make a 3-second clip claim to be 26 seconds long. Unflash reads
+the *real* timeline from the packet index, bridges timestamp anomalies
+(reported as section warnings), forces audio and video part durations to
+match exactly during export, and sanity-checks the final concatenation — so
+none of these produce frozen or desynced output. Sections work on the
+repaired timeline; frame identity is the ordinal within a section, with
+per-frame timestamps from ffmpeg's `showinfo` as ground truth.
+
+## Limitations — please read
+
+- **This is risk reduction, not a guarantee.** Passing the detector means
+  passing WCAG-style thresholds, not that content is safe for every person.
+- Static spatial patterns (fine stripes, gratings) can also trigger
+  photosensitive responses and are **not** detected.
+- Review flagged sections yourself before sharing; the player dims unedited
+  content by default as a courtesy, not a safeguard.
