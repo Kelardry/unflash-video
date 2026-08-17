@@ -81,19 +81,33 @@ luminance change is >= 10% of max luminance with the darker state < 0.80
 (red: |Δ(R−G−B)×320| > 20 **and** the pixel enters or leaves the saturated
 state R/(R+G+B) >= 0.8 — brightness wobble inside a continuously-red scene is
 not a red flash; red↔dark flashing is caught by the general luminance
-criterion). A pixel *flashes*
-when it completes a pair of opposing qualifying transitions within a second
-(so motion — an edge sweeping the screen — does not count, but a flash
-ramping over several frames does). Content fails when pixels flashing more
-than 3 times per second (WCAG; strict profile: 2) cover at least a quarter
-(strict: a fifth) of any 341×256 window with the content viewed at 1024×768.
-Calibrated against synthetic patterns: exactly 3 flashes/s passes WCAG,
-4 fails; 15% window area passes, 35% fails; bright-only flicker (both states
-above 0.80) passes; jittered multi-frame ramps fail; moving objects pass.
+criterion). A pixel *flashes* when it completes a pair of opposing
+qualifying transitions within a second. Content fails only when three
+things hold at once in some 341×256 window (content viewed at 1024×768):
 
-The default **strict** profile is tighter than WCAG because photosensitive-
-migraine thresholds are lower than seizure thresholds; the exact-WCAG profile
-is selectable in the header and is used by all checks/verifications.
+1. pixels flashing more than 3 times per second (strict profile: 2) cover
+   at least a quarter (strict: a fifth) of the window,
+2. those pixels flashed *just now* (concurrency — a band sweeping across
+   the screen during a pan is not simultaneous flashing), and
+3. the window's **mean** luminance is itself flashing at that rate
+   (coherence — a dark limb swinging over a bright background flicks
+   individual pixels while the region's overall brightness barely moves).
+
+Calibrated against synthetic patterns (tests/): exactly 3 flashes/s passes
+WCAG, 4 fails; 15% window area passes, 35% fails; bright-only flicker
+passes; jittered multi-frame ramps fail; moving boxes, slow pans over
+high-contrast edges and swinging occluders (walking characters) pass; fast
+dense scrolling gratings (strobe-equivalent) fail. Validated on real anime:
+a 23-minute episode yields a handful of short, plausible flash windows
+(lightning strikes, a flash-cut OP montage) instead of blanket coverage.
+
+Extended-flash warnings (sustained sub-threshold flashing; not part of
+WCAG) are **advisory**: they appear as gray marks along the top of the
+timeline but never create sections or block anything.
+
+The default profile is **exact WCAG**; a stricter profile (tighter
+thresholds, 2 flashes/s — extra margin for photosensitive migraine) is
+selectable in the header and is used by all checks and verifications.
 
 ## Messy real-world files
 

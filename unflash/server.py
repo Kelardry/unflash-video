@@ -15,7 +15,7 @@ from flask import (Flask, jsonify, request, send_file, send_from_directory,
 
 from . import ffio
 from .analysis import analyze_file, violations_to_sections, timeline_summary
-from .config import wcag_config, strict_config
+from .config import wcag_config, strict_config, profile_name
 from .editing import prepare_section, suggest_edits, check_section
 from .jobs import JobManager
 from .project import Project
@@ -74,10 +74,17 @@ def pick_file():
         "('All files','*.*')])\n"
         "print(p or '')"
     )
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                       text=True, timeout=300)
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return jsonify({"path": None, "error": "File dialog timed out"})
     path = (r.stdout or "").strip()
-    return jsonify({"path": path or None})
+    err = None
+    if not path and r.returncode != 0:
+        err = ("File dialog failed: "
+               + (r.stderr or "").strip()[-300:] or "unknown error")
+    return jsonify({"path": path or None, "error": err})
 
 
 @app.post("/api/pick_save")
@@ -100,10 +107,23 @@ def pick_save():
 @app.post("/api/open")
 def open_video():
     data = request.get_json(force=True) or {}
-    path = data.get("path", "")
+    path = (data.get("path") or "").strip().strip('"')
     if not path or not os.path.exists(path):
         return _err(f"File not found: {path}", 404)
-    state["project"] = Project(path)
+    try:
+        project = Project(path)
+    except Exception as e:  # noqa: BLE001 - reported to the UI
+        return _err(f"Could not open '{os.path.basename(path)}': {e}", 400)
+    # some files (e.g. streamed webm) have no duration metadata; index the
+    # packets right away so the timeline has real bounds
+    info = project.data["info"]
+    if not info.get("duration") or info["duration"] <= 0:
+        try:
+            project.ensure_index()
+        except Exception as e:  # noqa: BLE001
+            return _err(f"'{os.path.basename(path)}' has no duration and "
+                        f"packet indexing failed: {e}", 400)
+    state["project"] = project
     return project_state()
 
 
@@ -119,6 +139,7 @@ def project_state():
     d["workdir"] = p.workdir
     d["n_keyframes"] = len(p.data["keyframes"])
     d["bounds"] = list(p.bounds)
+    d["profile"] = profile_name(p.data["detector"])
     d.pop("keyframes", None)
     return jsonify({"project": d})
 
@@ -175,8 +196,9 @@ def scan():
             cancel=job.cancelled)
         if job.cancelled():
             return None
-        sections = violations_to_sections(res.violations, cfg, bounds,
-                                          p.data["keyframes"])
+        # exact section bounds (no keyframe snap: a 1.4s problem should not
+        # become a 14s section; only smart-cut needs alignment)
+        sections = violations_to_sections(res.violations, cfg, bounds, None)
         with p.lock:
             p.data["scan"] = {
                 "safe": res.safe,
@@ -195,12 +217,16 @@ def scan():
                 overlaps = any(sec["start"] < e and sec["end"] > s
                                for s, e in existing)
                 if not overlaps:
+                    # exact bounds — keyframe snapping inflated sections
+                    # (only smart-cut needs alignment; it checks at export)
                     p.add_section(sec["start"], sec["end"], sec["kinds"],
                                   snap=False)
                     created += 1
             p.save()
+        n_ext = sum(1 for v in res.violations if v.kind == "extended")
         return {"safe": res.safe, "sections_created": created,
-                "violations": len(res.violations)}
+                "violations": len(res.violations) - n_ext,
+                "extended_advisories": n_ext}
 
     job = jobs.start("scan", run)
     return jsonify({"job": job.id})
@@ -221,6 +247,20 @@ def add_section():
 def delete_section(sid):
     proj().remove_section(sid)
     return jsonify({"ok": True})
+
+
+@app.delete("/api/sections")
+def delete_all_sections():
+    p = proj()
+    import shutil
+    with p.lock:
+        ids = list(p.data["sections"].keys())
+        for sid in ids:
+            d = os.path.join(p.workdir, f"section_{sid}")
+            shutil.rmtree(d, ignore_errors=True)
+        p.data["sections"] = {}
+        p.save()
+    return jsonify({"deleted": len(ids)})
 
 
 @app.patch("/api/section/<sid>")

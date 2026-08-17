@@ -52,8 +52,7 @@ def main(argv=None):
     else:
         idx = ffio.index_video(args.video)
         bounds = (idx["ts_min"], idx["ts_max"])
-        sections = violations_to_sections(res.violations, cfg, bounds,
-                                          idx["keyframes"])
+        sections = violations_to_sections(res.violations, cfg, bounds, None)
         timeline = timeline_summary(res, bounds)
         if args.json:
             print(json.dumps({"sections": sections, "timeline": timeline,

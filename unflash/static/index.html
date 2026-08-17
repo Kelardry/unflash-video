@@ -16,8 +16,9 @@
   <label class="profile-label" title="Notify + beep when an operation takes longer than this many minutes">🔔≥<input type="number" id="notifyMin" min="0" step="1" style="width:3.2em"> min</label>
   <label class="profile-label">Profile
     <select id="profileSel">
-      <option value="strict">Strict (default)</option>
-      <option value="wcag">Exact WCAG</option>
+      <option value="wcag">Exact WCAG (default)</option>
+      <option value="strict">Stricter than WCAG</option>
+      <option value="custom" disabled hidden>Custom</option>
     </select>
   </label>
   <button id="btnScan" disabled>Scan for flashes</button>
@@ -49,6 +50,7 @@
       <h2>Sections</h2>
       <button id="btnPrepareAll" class="small" title="Prepare every section that isn't prepared yet">prepare all</button>
       <button id="btnRenderAll" class="small" title="Render every prepared section at full resolution, skipping ones already rendered with current edits">render all</button>
+      <button id="btnDeleteAll" class="small danger" title="Delete every section, including their edits and renders">delete all</button>
     </div>
     <div id="sectionList" class="section-list"></div>
   </aside>

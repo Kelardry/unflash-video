@@ -9,8 +9,8 @@ WCAG 2.x / PEAT reference thresholds:
   - extended flash warning: 5 s where >= 80% of frames flash at >= 1/3 of the
     area threshold
 
-The default profile here is *stricter* than WCAG (per user preference):
-lower swing/area thresholds and a 2-flashes-per-second limit.
+The default profile is exact WCAG; strict_config() tightens the thresholds
+for extra margin (lower swing/area thresholds, 2 flashes/s limit).
 """
 
 from dataclasses import dataclass, asdict, fields
@@ -18,11 +18,11 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class DetectorConfig:
-    # --- thresholds (strict defaults; see wcag_config() for the exact spec) ---
-    swing_threshold: float = 0.08        # WCAG: 0.10 relative luminance
+    # --- thresholds (exact WCAG defaults) ---
+    swing_threshold: float = 0.10        # relative luminance swing
     dark_threshold: float = 0.80         # darker state must be below this
-    area_fraction: float = 0.20          # WCAG: 0.25 of the 341x256 window
-    flash_limit: float = 2.0             # fail when flashes/s > limit (WCAG: 3)
+    area_fraction: float = 0.25          # of the 341x256 window
+    flash_limit: float = 3.0             # fail when flashes/s > limit
     red_delta_threshold: float = 20.0    # on (R-G-B)*320 scale
     red_saturation: float = 0.80         # R/(R+G+B)
     # --- extended flash warning ---
@@ -58,16 +58,24 @@ class DetectorConfig:
         return cls(**{k: v for k, v in (d or {}).items() if k in known})
 
 
-def strict_config() -> DetectorConfig:
+def wcag_config() -> DetectorConfig:
     return DetectorConfig()
 
 
-def wcag_config() -> DetectorConfig:
+def strict_config() -> DetectorConfig:
     return DetectorConfig(
-        swing_threshold=0.10,
-        area_fraction=0.25,
-        flash_limit=3.0,
+        swing_threshold=0.08,
+        area_fraction=0.20,
+        flash_limit=2.0,
     )
+
+
+def profile_name(detector_dict) -> str:
+    if detector_dict == wcag_config().to_dict():
+        return "wcag"
+    if detector_dict == strict_config().to_dict():
+        return "strict"
+    return "custom"
 
 
 @dataclass

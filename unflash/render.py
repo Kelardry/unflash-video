@@ -223,13 +223,8 @@ def render_section(project, sid, source, out_path, job=None,
 
 
 def _profile_name(project):
-    from .config import wcag_config, strict_config
-    d = project.data["detector"]
-    if d == wcag_config().to_dict():
-        return "wcag"
-    if d == strict_config().to_dict():
-        return "strict"
-    return "custom"
+    from .config import profile_name
+    return profile_name(project.data["detector"])
 
 
 def _emit(pipe, frame_bytes, slot, end_t, grid):

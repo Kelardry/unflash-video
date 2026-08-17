@@ -202,20 +202,25 @@ class _Pool:
         self.pol[mask] = 0
 
 
-class _FlashRing:
-    """Per-pixel flash counter.
+class _FlashCounter:
+    """Per-pixel flash pairing and rate tracking.
 
     A pixel *flashes* when it completes two opposing qualifying transitions
-    within a second of each other (disjoint pairing, per WCAG's "pair of
-    opposing changes"). The ring stores each pixel's last K flash times; a
-    pixel is *hazardous* when it has flashed more than `limit` times within
-    the trailing second. This is inherently robust against motion: an edge
-    sweeping across the screen brightens each pixel only once per pass.
+    within a second (disjoint pairing, per WCAG's "pair of opposing
+    changes"). The ring stores each pixel's last K flash times so its flash
+    *rate* is known; a pixel is over the limit when it has flashed more than
+    `limit` times within the trailing second.
+
+    Rate is per pixel, so a single edge sweeping the screen (each pixel
+    brightens once per pass) never exceeds the limit — but a scrolling
+    high-contrast grating that really does flicker every pixel several times
+    a second correctly does.
     """
 
     def __init__(self, shape, limit):
         self.K = int(np.floor(limit)) + 1
         self.ring = np.full((self.K,) + shape, -1e12, np.float32)
+        self.last = np.full(shape, -1e12, np.float32)   # most recent flash
         self.pend_pol = np.zeros(shape, np.int8)
         self.pend_t = np.full(shape, -1e12, np.float32)
 
@@ -228,17 +233,25 @@ class _FlashRing:
             sub = np.roll(self.ring[:, flash], 1, axis=0)
             sub[0] = tc
             self.ring[:, flash] = sub
+            self.last[flash] = tc
             self.pend_pol[flash] = 0
             self.pend_t[flash] = -1e12
         if rest.any():
             self.pend_pol[rest] = pol
             self.pend_t[rest] = tc
 
-    def hazard(self, tc):
-        """Pixels whose (limit+1)-th most recent flash is under a second old.
-        The 1e-3 epsilon keeps content at exactly the limit (e.g. exactly
-        3 flashes/s under WCAG) on the passing side of the boundary."""
-        return (tc - self.ring[self.K - 1]) < (1.0 - 1e-3)
+    def strobing(self, tc, fresh_window):
+        """Pixels that are over the rate limit AND flashed just now.
+
+        The rate check ((limit+1)-th most recent flash under a second old,
+        with an epsilon so exactly-at-limit content passes) finds pixels
+        genuinely flickering too fast. The freshness check makes the WCAG
+        area test *concurrent*: during a pan, pixels exceed neither test
+        together — the freshly-crossed band is thin and mostly under-rate —
+        while a real strobe lights the whole region at once, every cycle.
+        """
+        over_rate = (tc - self.ring[self.K - 1]) < (1.0 - 1e-3)
+        return over_rate & ((tc - self.last) <= fresh_window)
 
 
 class FlashDetector:
@@ -254,11 +267,32 @@ class FlashDetector:
         self.lum = _ExtremaTracker(cfg.noise_eps)
         self.red = _ExtremaTracker(cfg.red_noise_eps)
         shape = (ah, aw)
+        # transition pools: chart statistics only
         self.pool_gen = _Pool(shape, cfg.area_accum_window)
         self.pool_red = _Pool(shape, cfg.area_accum_window)
-        self.flash_gen = _FlashRing(shape, cfg.flash_limit)
-        self.flash_red = _FlashRing(shape, cfg.flash_limit)
-        self.events = []
+        # flash machinery: per-pixel pairing + rate rings
+        self.flash_gen = _FlashCounter(shape, cfg.flash_limit)
+        self.flash_red = _FlashCounter(shape, cfg.flash_limit)
+        # coherence gate: scalar flash trackers on the MEAN luminance of a
+        # grid of window positions. A quarter-area flash of >=0.1 amplitude
+        # swings the window mean by >= 0.1*0.25; a dark limb swinging across
+        # a bright background flicks pixels without moving the mean.
+        sx = max(1, self.ww // 8)
+        sy = max(1, self.wh // 8)
+        self.gxs = np.unique(np.append(np.arange(0, aw - self.ww + 1, sx),
+                                       aw - self.ww)).astype(int)
+        self.gys = np.unique(np.append(np.arange(0, ah - self.wh + 1, sy),
+                                       ah - self.wh)).astype(int)
+        gshape = (len(self.gys), len(self.gxs))
+        self.mean_swing = max(0.02, cfg.swing_threshold * cfg.area_fraction)
+        self.mean_swing_red = cfg.red_delta_threshold * cfg.area_fraction
+        self.mtrack_gen = _ExtremaTracker(self.mean_swing * 0.3)
+        self.mtrack_red = _ExtremaTracker(self.mean_swing_red * 0.3)
+        self.mflash_gen = _FlashCounter(gshape, cfg.flash_limit)
+        self.mflash_red = _FlashCounter(gshape, cfg.flash_limit)
+        self.events = []          # strobing moments (area-qualified)
+        self._last_event_tc = {"general": -1e12, "red": -1e12}
+        self._above = {"general": False, "red": False}
         from array import array
         self.stat_t = array("d")     # native pts
         self.stat_tc = array("d")    # monotonic clock
@@ -266,13 +300,26 @@ class FlashDetector:
         self.stat_up = array("i")
         self.stat_dn = array("i")
         self.stat_red = array("i")
-        self.stat_haz = array("i")       # hazard area (general)
-        self.stat_haz_red = array("i")   # hazard area (red)
+        self.stat_haz = array("i")       # synchronized flash area (general)
+        self.stat_haz_red = array("i")   # synchronized flash area (red)
+        self.stat_ext = array("i")       # recently-flashing area (extended)
+        self.stat_ext_red = array("i")
         self.n = 0
         self.anomalies = 0
         self._last_native = None
         self._clock = 0.0
         self._recent_dt = []
+
+    def _window_sums(self, arr):
+        """Sum of `arr` over every grid window position -> (gy, gx) array."""
+        h, w = arr.shape
+        ii = np.zeros((h + 1, w + 1), np.float64)
+        ii[1:, 1:] = arr.astype(np.float64).cumsum(0).cumsum(1)
+        ys, xs = self.gys, self.gxs
+        return (ii[np.ix_(ys + self.wh, xs + self.ww)]
+                - ii[np.ix_(ys, xs + self.ww)]
+                - ii[np.ix_(ys + self.wh, xs)]
+                + ii[np.ix_(ys, xs)])
 
     def _advance_clock(self, t):
         if self._last_native is None:
@@ -317,39 +364,79 @@ class FlashDetector:
         rq_up = r_up & ((rext - rbase) > cfg.red_delta_threshold) & sat_changed
         rq_dn = r_dn & ((rbase - rext) > cfg.red_delta_threshold) & sat_changed
 
-        # per-pixel flash counting drives the actual violations
-        self.flash_gen.transitions(q_up, 1, tc)
-        self.flash_gen.transitions(q_dn, -1, tc)
-        self.flash_red.transitions(rq_up, 1, tc)
-        self.flash_red.transitions(rq_dn, -1, tc)
-        haz = haz_red = 0
-        hz = self.flash_gen.hazard(tc)
-        if hz.any():
-            haz, _ = _best_window(hz, self.ww, self.wh)
-        hzr = self.flash_red.hazard(tc)
-        if hzr.any():
-            haz_red, _ = _best_window(hzr, self.ww, self.wh)
+        # --- coherence gate: window-mean flash tracking ---------------------
+        npix = self.ww * self.wh
+        mL = self._window_sums(L) / npix
+        mu, md, mb, me, _, _ = self.mtrack_gen.feed(mL.astype(np.float32))
+        self.mflash_gen.transitions(mu & ((me - mb) >= self.mean_swing),
+                                    1, tc)
+        self.mflash_gen.transitions(md & ((mb - me) >= self.mean_swing),
+                                    -1, tc)
+        mV = self._window_sums(V) / npix
+        ru2, rd2, rb2, re2, _, _ = self.mtrack_red.feed(mV.astype(np.float32))
+        self.mflash_red.transitions(
+            ru2 & ((re2 - rb2) >= self.mean_swing_red), 1, tc)
+        self.mflash_red.transitions(
+            rd2 & ((rb2 - re2) >= self.mean_swing_red), -1, tc)
 
-        # pooled transition events are kept for the UI (charts, timeline)
+        # --- flashes: per-pixel rate + concurrent area + coherent mean ------
+        haz = haz_red = 0
+        ext_g = ext_r = 0
+        fresh_w = cfg.area_accum_window
+        for counter, mflash, kind in (
+                (self.flash_gen, self.mflash_gen, "general"),
+                (self.flash_red, self.mflash_red, "red")):
+            masks = ((q_up, 1), (q_dn, -1)) if kind == "general" \
+                else ((rq_up, 1), (rq_dn, -1))
+            for q, pol in masks:
+                counter.transitions(q, pol, tc)
+            best = 0
+            strobe = counter.strobing(tc, fresh_w)
+            if strobe.any():
+                counts = self._window_sums(strobe)
+                coherent = mflash.strobing(tc, max(fresh_w, 0.2))
+                cond = (counts >= self.area_thresh) & coherent
+                if cond.any():
+                    k = int(np.argmax(np.where(cond, counts, 0)))
+                    gy, gx = divmod(k, counts.shape[1])
+                    best = int(counts[gy, gx])
+                    bbox = (int(self.gxs[gx]), int(self.gys[gy]),
+                            int(self.gxs[gx] + self.ww),
+                            int(self.gys[gy] + self.wh))
+                    if (not self._above[kind]
+                            or tc - self._last_event_tc[kind] >= 0.25):
+                        self.events.append(
+                            TransitionEvent(t, tc, 0, kind, best, bbox))
+                        self._last_event_tc[kind] = tc
+            self._above[kind] = best > 0
+            # recently-flashing area for the extended warning: the window
+            # mean must have flashed at least twice in the trailing second
+            # (>= 1/3 of the failure rate), so mouth-flaps/blinks in
+            # dialogue close-ups don't accumulate into warnings
+            recent = (tc - counter.last) <= 1.0
+            ext_best = 0
+            if recent.any():
+                rcounts = self._window_sums(recent)
+                rcoh = (tc - mflash.ring[1]) <= 1.0
+                rcond = rcounts * rcoh
+                ext_best = int(rcond.max())
+            if kind == "general":
+                haz, ext_g = best, ext_best
+            else:
+                haz_red, ext_r = best, ext_best
+
+        # pooled transition areas: chart statistics only
         self.pool_gen.add(q_up, 1, tc)
         self.pool_gen.add(q_dn, -1, tc)
         self.pool_red.add(rq_up, 1, tc)
         self.pool_red.add(rq_dn, -1, tc)
-
         areas = {}
         for pool, kind in ((self.pool_gen, "general"), (self.pool_red, "red")):
             for pol in (1, -1):
                 act = pool.active(pol, tc)
                 count = int(act.sum())
-                if count == 0:
-                    areas[(kind, pol)] = 0
-                    continue
-                best, bbox = _best_window(act, self.ww, self.wh)
-                areas[(kind, pol)] = best
-                if best >= self.area_thresh:
-                    self.events.append(
-                        TransitionEvent(t, tc, pol, kind, best, bbox))
-                    pool.clear(act)
+                areas[(kind, pol)] = 0 if count == 0 else \
+                    _best_window(act, self.ww, self.wh)[0]
 
         self.stat_t.append(t)
         self.stat_tc.append(tc)
@@ -359,6 +446,8 @@ class FlashDetector:
         self.stat_red.append(max(areas[("red", 1)], areas[("red", -1)]))
         self.stat_haz.append(haz)
         self.stat_haz_red.append(haz_red)
+        self.stat_ext.append(ext_g)
+        self.stat_ext_red.append(ext_r)
         self.n += 1
 
     def finish(self) -> AnalysisResult:
@@ -377,15 +466,15 @@ class FlashDetector:
             "hazard": self.stat_haz,
             "hazard_red": self.stat_haz_red,
         }
-        res.violations += self._hazard_violations(self.stat_haz, "flash")
-        res.violations += self._hazard_violations(self.stat_haz_red, "red")
+        res.violations += self._strobe_violations(self.stat_haz, "flash")
+        res.violations += self._strobe_violations(self.stat_haz_red, "red")
         res.violations += self._extended_warnings()
         res.violations.sort(key=lambda v: v.start)
         return res
 
-    def _hazard_violations(self, areas, kind):
-        """Frames where pixels flashing above the frequency limit cover the
-        area threshold, merged into intervals (native time)."""
+    def _strobe_violations(self, areas, kind):
+        """Frames where concurrently-strobing pixels cover the area
+        threshold, merged into intervals (native time)."""
         out = []
         cur = None
         cur_end_tc = None
@@ -404,14 +493,17 @@ class FlashDetector:
         return out
 
     def _extended_warnings(self):
+        """ITC/Ofcom-style extended flash: >= 80% of frames over 5 s with
+        *actual flashing* (pixels that completed flash pairs within the last
+        second) covering at least a third of the failure area."""
         cfg = self.cfg
         if self.n == 0:
             return []
         third = self.area_thresh * cfg.extended_area_ratio
         t = np.asarray(self.stat_t)
         tc = np.asarray(self.stat_tc)
-        flashy = (np.maximum(np.asarray(self.stat_up), np.asarray(self.stat_dn))
-                  >= third) | (np.asarray(self.stat_red) >= third)
+        flashy = (np.asarray(self.stat_ext) >= third) | \
+            (np.asarray(self.stat_ext_red) >= third)
         out = []
         n = self.n
         j = 0
@@ -434,32 +526,6 @@ class FlashDetector:
         return out
 
 
-def _pair_flashes(events):
-    """Pair opposing transitions into flashes. A pair must overlap spatially
-    (opposing changes in unrelated regions are motion, not a flash) and occur
-    within 1 second of each other on the internal clock.
-
-    Returns a list of (tc, t_native) flash times.
-    """
-    flashes = []
-    pending = []
-    for e in sorted(events, key=lambda e: e.tc):
-        pending = [p for p in pending if e.tc - p.tc <= 1.0]
-        match = None
-        for p in pending:
-            if p.polarity != e.polarity and _bbox_overlap(p.bbox, e.bbox):
-                match = p
-                break
-        if match is not None:
-            pending.remove(match)
-            flashes.append((e.tc, e.t))
-        else:
-            pending.append(e)
-            if len(pending) > 12:
-                pending.pop(0)
-    return flashes
-
-
 def _windows_over_limit(flashes, limit, kind):
     """1-second sliding windows containing more than `limit` flashes.
     `flashes` is a list of (tc, t_native); windows run on tc, violations are
@@ -469,7 +535,9 @@ def _windows_over_limit(flashes, limit, kind):
     j = 0
     cur = None
     for i in range(n):
-        while j < n and flashes[j][0] <= flashes[i][0] + 1.0:
+        # strictly-inside-one-second window (epsilon keeps content at exactly
+        # the limit, e.g. exactly 3 flashes/s under WCAG, on the passing side)
+        while j < n and flashes[j][0] < flashes[i][0] + 1.0 - 1e-3:
             j += 1
         count = j - i
         if count > limit:
@@ -517,11 +585,17 @@ def analyze_file(path, cfg, start=None, duration=None, progress=None,
 
 
 def violations_to_sections(violations, cfg, bounds, keyframes=None):
-    """Merge violations into padded, keyframe-snapped work sections.
-    `bounds` = (ts_min, ts_max): the video's real native-pts range."""
+    """Merge violations into padded work sections.
+    `bounds` = (ts_min, ts_max): the video's real native-pts range.
+
+    Extended-flash warnings are advisory (not part of WCAG) and do NOT
+    create sections — only actual flash/red failures do.
+    """
     ts_min, ts_max = bounds
     intervals = []
     for v in violations:
+        if v.kind == "extended":
+            continue
         s = max(ts_min, v.start - cfg.section_pad)
         e = min(ts_max, v.end + cfg.section_pad)
         if e - s < cfg.section_min_len:
@@ -576,9 +650,10 @@ def timeline_summary(result, bounds, bin_seconds=1.0):
     general = np.zeros(nbins, np.float32)
     red = np.zeros(nbins, np.float32)
     for kind, arr in (("general", general), ("red", red)):
-        for _tc, t in _pair_flashes([e for e in result.events
-                                     if e.kind == kind]):
-            b = min(nbins - 1, max(0, int((t - ts_min) / bin_seconds)))
+        for e in result.events:
+            if e.kind != kind:
+                continue
+            b = min(nbins - 1, max(0, int((e.t - ts_min) / bin_seconds)))
             arr[b] += 1
     return {"bin": bin_seconds, "t0": ts_min,
             "general": general.tolist(),

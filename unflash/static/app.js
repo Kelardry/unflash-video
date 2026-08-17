@@ -168,6 +168,7 @@ async function refreshProject(openSid = null) {
   $("videoInfo").textContent =
     `${p.video_path.split(/[\\/]/).pop()} — ${info.width}×${info.height}, ` +
     `${info.fps.toFixed(2)} fps, ${fmtTime(bounds()[1] - bounds()[0])}`;
+  if (p.profile) $("profileSel").value = p.profile;
   $("timelineWrap").classList.remove("hidden");
   drawTimeline();
   renderSectionList();
@@ -178,9 +179,15 @@ async function refreshProject(openSid = null) {
 $("btnOpen").onclick = async () => {
   try {
     const r = await api("/api/pick", "POST", {});
-    if (!r.path) return;
-    toast("Opening video…");
-    await api("/api/open", "POST", { path: r.path });
+    let path = r.path;
+    if (!path) {
+      if (r.error) toast(r.error, true);
+      // picker failed or was cancelled — offer a paste-a-path fallback
+      path = prompt("Or paste the full path of the video file:");
+      if (!path) return;
+    }
+    toast("Opening video… (large or unusual files can take a moment)");
+    await api("/api/open", "POST", { path });
     state.sectionId = null;
     $("workspace").classList.add("hidden");
     $("welcome").classList.remove("hidden");
@@ -200,9 +207,13 @@ $("btnScan").onclick = async () => {
   try {
     const r = await api("/api/scan", "POST", {});
     pollJob(r.job, "Scanning", (res) => {
-      toast(res.safe
+      let msg = res.safe
         ? "Scan complete: no violations found 🎉"
-        : `Scan complete: ${res.violations} violation window(s), ${res.sections_created} new section(s).`);
+        : `Scan complete: ${res.violations} violation window(s), ${res.sections_created} new section(s).`;
+      if (res.extended_advisories) {
+        msg += ` ${res.extended_advisories} extended-flash advisories (gray timeline marks — informational, no sections).`;
+      }
+      toast(msg);
       refreshProject();
     });
   } catch (e) { toast(e.message, true); }
@@ -234,6 +245,15 @@ function drawTimeline() {
       const x0 = X(tlt0 + i * tl.bin);
       const x1 = X(tlt0 + (i + 1) * tl.bin);
       ctx.fillRect(x0, H - 6 - h, Math.max(1, x1 - x0), h);
+    }
+  }
+  // extended-flash advisories: dim gray strips along the top (informational)
+  if (scan && scan.violations) {
+    ctx.fillStyle = "rgba(150,155,170,.35)";
+    for (const v of scan.violations) {
+      if (v.kind !== "extended") continue;
+      const x0 = X(v.start), x1 = X(v.end);
+      ctx.fillRect(x0, 0, Math.max(2, x1 - x0), 4);
     }
   }
   ctx.fillStyle = "#3a4050";
@@ -344,6 +364,21 @@ $("btnRenderAll").onclick = async () => {
       toast(msg, (res.unprepared || []).length > 0);
       refreshProject();
     });
+  } catch (e) { toast(e.message, true); }
+};
+
+$("btnDeleteAll").onclick = async () => {
+  const n = Object.keys((state.project || {}).sections || {}).length;
+  if (!n) { toast("No sections to delete"); return; }
+  if (!confirm(`Delete ALL ${n} sections, including their edits and renders? This cannot be undone.`)) return;
+  try {
+    const r = await api("/api/sections", "DELETE");
+    toast(`Deleted ${r.deleted} sections.`);
+    state.sectionId = null;
+    state.section = null;
+    $("workspace").classList.add("hidden");
+    $("welcome").classList.remove("hidden");
+    refreshProject();
   } catch (e) { toast(e.message, true); }
 };
 
