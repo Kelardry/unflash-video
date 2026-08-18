@@ -168,14 +168,23 @@ def snap_to_keyframes(keyframes, start, end, bounds):
 def sanitize_deltas(times, max_gap, fallback=1.0 / 30):
     """Make a frame-time list strictly sane: non-positive deltas and deltas
     beyond max_gap (source timestamp discontinuities) are replaced with the
-    running median delta. Returns (new_times, n_fixed)."""
+    running median delta. Returns (new_times, n_fixed).
+
+    Deltas are measured input-to-input. Measuring them against the *output*
+    instead would make every frame after the first bridged anomaly look like
+    another jump (the output trails the input by the bridged amount from then
+    on), silently flattening the rest of the timeline to the median delta.
+    """
     if not len(times):
         return list(times), 0
     out = [float(times[0])]
+    prev_in = float(times[0])
     recent = []
     fixed = 0
     for t in times[1:]:
-        d = float(t) - out[-1]
+        t = float(t)
+        d = t - prev_in
+        prev_in = t
         if d <= 0 or d > max_gap:
             d = float(np.median(recent)) if recent else fallback
             fixed += 1
@@ -185,6 +194,66 @@ def sanitize_deltas(times, max_gap, fallback=1.0 / 30):
                 recent.pop(0)
         out.append(out[-1] + d)
     return out, fixed
+
+
+def sanitize_setpts(max_gap, median_delta):
+    """A `setpts` expression applying the same rule as sanitize_deltas, for
+    spans that are re-encoded by ffmpeg directly instead of frame-by-frame.
+
+    The first frame is pinned to 0 and each following frame advances by its
+    own input delta, except non-positive deltas and deltas beyond max_gap,
+    which advance by median_delta instead. Unlike sanitize_deltas this uses a
+    fixed median (the source's, from the packet index) rather than a running
+    one -- filter expressions have no history beyond the previous frame.
+    """
+    d = "PTS-PREV_INPTS"
+    # commas inside filter arguments must be escaped for the graph parser
+    return ("setpts="
+            r"if(eq(N\,0)\,0\,PREV_OUTPTS+"
+            rf"if(lte({d}\,0)+gt({d}\,{max_gap:.6f}/TB)\,"
+            rf"{median_delta:.6f}/TB\,{d}))")
+
+
+def video_timescale(path):
+    """The file's video stream timescale (the denominator of its time_base),
+    or 0 if it can't be read."""
+    r = _run([FFPROBE, "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=time_base", "-of", "csv=p=0", path])
+    if r.returncode != 0:
+        return 0
+    tb = (r.stdout.strip().splitlines() or [""])[0].strip()
+    if "/" not in tb:
+        return 0
+    try:
+        num, den = tb.split("/")
+        return int(den) if int(num) == 1 else 0
+    except ValueError:
+        return 0
+
+
+def span_video_pts(path, start, end):
+    """Video packet timestamps inside [start, end), without decoding.
+
+    Used to work out what a span's timeline will look like before encoding
+    it. ffprobe seeks to the keyframe at or before `start`, so the extra
+    leading packets are filtered out here.
+    """
+    cmd = [FFPROBE, "-v", "error", "-select_streams", "v:0", "-read_intervals",
+           (f"{start:.6f}%{end:.6f}" if start > 0 else f"%{end:.6f}"),
+           "-show_entries", "packet=pts_time", "-of", "csv=p=0", path]
+    r = _run(cmd)
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        try:
+            t = float(line.strip().rstrip(","))
+        except ValueError:
+            continue
+        if start - 1e-6 <= t < end - 1e-6:
+            out.append(t)
+    out.sort()
+    return out
 
 
 def iter_frames(path, out_w, out_h, start=None, duration=None,
@@ -328,10 +397,14 @@ def make_thumbnails(path, out_dir, start, duration, thumb_w, progress=None,
 _TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
-def run_ffmpeg(cmd, duration=None, progress=None, cancel=None):
-    """Run an ffmpeg command, reporting progress (0..1) parsed from stderr."""
+def run_ffmpeg(cmd, duration=None, progress=None, cancel=None, cwd=None):
+    """Run an ffmpeg command, reporting progress (0..1) parsed from stderr.
+
+    `cwd` lets callers pass short relative paths, which matters when the
+    command names many inputs (see render.CMD_CHAR_LIMIT).
+    """
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE,
+                            stderr=subprocess.PIPE, cwd=cwd,
                             creationflags=CREATE_NO_WINDOW)
     tail = []
     for raw in proc.stderr:

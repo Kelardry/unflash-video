@@ -888,8 +888,39 @@ $("btnExport").onclick = () => {
     "<br><br>Every section must be rendered at full resolution (and ideally ✓ safe) before export.";
   $("exportResult").textContent = "";
   $("exportModal").classList.remove("hidden");
+  refreshExportPlan();
 };
 $("btnCloseExport").onclick = () => $("exportModal").classList.add("hidden");
+
+// how the selected assembly will run, and whether the part count forces
+// the filter join to be split into batches
+async function refreshExportPlan() {
+  const el = $("exportPlan");
+  const mode = $("exportMode").value;
+  el.className = "hint";
+  try {
+    const r = await api("/api/export_plan?mode=" + encodeURIComponent(mode));
+    if (mode.endsWith("-filter")) {
+      let txt = `Filter join: decodes and re-encodes the whole video once ` +
+        `(one extra generation, ~45 dB PSNR — visually invisible). ` +
+        `${r.parts} parts, command ${r.chars} of ${r.limit} characters.`;
+      if (r.batches > 1) {
+        txt += ` ⚠ That is more than one ffmpeg command can name, so the ` +
+          `export will be assembled in ${r.batches} batches and those joined ` +
+          `by stream copy — still only one re-encode generation, but slower.`;
+        el.className = "hint warn";
+      }
+      el.textContent = txt;
+    } else if (mode === "smartcut") {
+      el.textContent = `Untouched spans are copied, not re-encoded. ` +
+        `${r.parts} parts. Needs keyframe-aligned sections.`;
+    } else {
+      el.textContent = `Stream-copy join: no re-encode at the join, ` +
+        `so no quality loss. ${r.parts} parts.`;
+    }
+  } catch (e) { el.textContent = ""; }
+}
+$("exportMode").onchange = refreshExportPlan;
 
 $("btnDoExport").onclick = async () => {
   try {

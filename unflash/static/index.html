@@ -155,10 +155,12 @@
     <p id="exportSummary"></p>
     <label>Mode
       <select id="exportMode">
-        <option value="reencode">Re-encode everything (robust, slower)</option>
+        <option value="reencode">Re-encode spans &middot; stream-copy join (lossless join, fastest)</option>
+        <option value="reencode-filter">Re-encode spans &middot; filter join (re-encodes once more, most robust)</option>
         <option value="smartcut">Smart-cut (fast; copies untouched spans, h264 sources only)</option>
       </select>
     </label>
+    <p id="exportPlan" class="hint"></p>
     <div class="modal-actions">
       <button id="btnDoExport" class="primary">Choose output & export</button>
       <button id="btnVerifyExport">Verify exported file</button>

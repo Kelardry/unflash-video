@@ -19,7 +19,8 @@ from .config import wcag_config, strict_config, profile_name
 from .editing import prepare_section, suggest_edits, check_section
 from .jobs import JobManager
 from .project import Project
-from .render import render_section, export_video, verify_file
+from .render import (render_section, export_video, verify_file,
+                     filter_assembly_estimate)
 
 app = Flask(__name__, static_folder=None)
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -446,17 +447,35 @@ def media(sid, name):
 
 # --- export ------------------------------------------------------------------
 
+def _split_mode(raw):
+    """UI sends one string; '<mode>-filter' selects the filter join."""
+    mode, _, asm = (raw or "reencode").partition("-")
+    return (mode or "reencode"), ("filter" if asm == "filter" else "copy")
+
+
+@app.get("/api/export_plan")
+def export_plan():
+    """How the chosen assembly would run: part count, command length, and
+    whether that forces batching. Used to warn before the export starts."""
+    p = proj()
+    mode, assembly = _split_mode(request.args.get("mode"))
+    info = filter_assembly_estimate(p, mode)
+    info["assembly"] = assembly
+    return jsonify(info)
+
+
 @app.post("/api/export")
 def export():
     p = proj()
     data = request.get_json(force=True) or {}
-    mode = data.get("mode", "reencode")
+    mode, assembly = _split_mode(data.get("mode"))
     out = data.get("path")
     if not out:
         base, _ = os.path.splitext(p.video_path)
         out = base + ".unflashed.mp4"
     job = jobs.start("export",
-                     lambda job: export_video(p, out, mode=mode, job=job))
+                     lambda job: export_video(p, out, mode=mode,
+                                              assembly=assembly, job=job))
     return jsonify({"job": job.id, "path": out})
 
 

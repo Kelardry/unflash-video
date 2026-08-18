@@ -58,10 +58,20 @@ A browser page opens at http://127.0.0.1:8765/. Everything runs locally.
    with their current edits). If you edit a section after rendering it, it
    gets a *render stale ⚠* badge — re-render it, or export will warn.
 8. **Export** — stitches rendered sections with the untouched spans.
-   *Re-encode* mode is robust; *smart-cut* stream-copies untouched spans
-   (fast, h264 sources only). The export self-checks that the output's
-   timing matches the sum of its parts. Then **Verify exported file**
-   re-scans the final output with your selected detector profile.
+   Both *re-encode* options rebuild every untouched span and differ only in
+   how the parts are joined: the **stream-copy join** stitches them without
+   re-encoding (fastest, no quality loss), while the **filter join** decodes
+   and concatenates everything in a single ffmpeg pass — one extra encode
+   generation (~45 dB PSNR, visually invisible) in exchange for rebuilding
+   every timestamp, so no mismatch between parts can throw it off.
+   *Smart-cut* stream-copies untouched spans (fast, h264 sources only).
+   The dialog reports what the chosen join will do before you start,
+   including the part count; past roughly 275 sections the filter join needs
+   more inputs than one command line can name, so the export is assembled in
+   batches — those are joined by stream copy, so batching costs no extra
+   quality. The export self-checks that the output's timing matches the sum
+   of its parts. Then **Verify exported file** re-scans the final output
+   with your selected detector profile.
 
 The 🔔 field in the header sets a threshold (minutes): any operation that
 takes longer triggers a beep + desktop notification when it finishes.
@@ -114,10 +124,19 @@ selectable in the header and is used by all checks and verifications.
 Stream VODs and clipped videos often have broken timestamps: negative start
 times, variable frame rate, audio offset from video, or multi-second pts
 jumps that make a 3-second clip claim to be 26 seconds long. Unflash reads
-the *real* timeline from the packet index, bridges timestamp anomalies
-(reported as section warnings), forces audio and video part durations to
-match exactly during export, and sanity-checks the final concatenation — so
-none of these produce frozen or desynced output. Sections work on the
+the *real* timeline from the packet index and bridges timestamp anomalies in
+both the edited sections **and** the untouched spans between them (reported
+as warnings, since bridging a jump makes the export shorter than the
+source's nominal duration). Audio and video durations are forced to match
+exactly in every part, and every part is written on one shared mp4 timescale
+— sections are constant-rate on the fine grid while untouched spans inherit
+the source's rate, so their timebases disagree by construction, and the
+concat demuxer does not reconcile that: it mis-stamps whatever disagrees
+with the first part, collapsing it to a few milliseconds and leaving a hole
+where it should have been. Parts rendered before this was pinned are
+remuxed (a stream copy) rather than re-rendered. The final concatenation is
+sanity-checked for span and gaps. Untouched spans keep the source's exact
+frame-to-frame timing throughout, VFR included. Sections work on the
 repaired timeline; frame identity is the ordinal within a section, with
 per-frame timestamps from ffmpeg's `showinfo` as ground truth.
 
