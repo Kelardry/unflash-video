@@ -28,7 +28,8 @@ A browser page opens at http://127.0.0.1:8765/. Everything runs locally.
    all state (sections, edits, proxies, renders) persists there, so you can
    close and resume anytime.
 2. **Scan for flashes** — a WCAG 2.x / PEAT-style detector (general flash,
-   red flash, extended-flash warning) runs over the whole video and produces
+   red flash, and — unless the profile is *Exact WCAG only* — extended
+   flashes) runs over the whole video and produces
    numbered work *sections* around each problem, snapped to keyframes. The
    timeline shows a flash-intensity heatmap. You can also add sections by
    dragging on the timeline or typing exact timestamps, and change a
@@ -111,13 +112,43 @@ dense scrolling gratings (strobe-equivalent) fail. Validated on real anime:
 a 23-minute episode yields a handful of short, plausible flash windows
 (lightning strikes, a flash-cut OP montage) instead of blanket coverage.
 
-Extended-flash warnings (sustained sub-threshold flashing; not part of
-WCAG) are **advisory**: they appear as gray marks along the top of the
-timeline but never create sections or block anything.
+**Extended flashes** are the same hazard one step below the failure rate:
+flashing that satisfies *every* criterion above — swing, dark state,
+concurrency, area, mean coherence — at exactly the permitted rate (3
+flashes/s) rather than above it, recurring
+without a gap longer than a second for at least 5 s. WCAG passes that;
+ITC/Ofcom guidance treats sustained flashing at the limit as a hazard, and
+it still affects some viewers.
 
-The default profile is **exact WCAG**; a stricter profile (tighter
-thresholds, 2 flashes/s — extra margin for photosensitive migraine) is
-selectable in the header and is used by all checks and verifications.
+The rate test is what keeps this honest. Anything the failure test rejects
+as motion rather than flashing — pans, cuts between light and dark shots,
+scrolling credits, blinks and mouth-flaps — is rejected here for the same
+reason, because a pixel crossed once by a moving edge does not flash three
+times a second. (An earlier version asked only that pixels had flashed
+*once* in the last second over a third of the area, which flagged ordinary
+dialogue scenes and scrolling end credits.)
+
+3 flashes/s is also the lowest rate at which the separation holds, which is
+why the strict profile does not flag extended flashes: its own limit is
+2 flashes/s, and at that rate scrolling credits and shot-cut dialogue are
+indistinguishable from flashing by per-pixel rate, area, swing or window-mean
+amplitude (measured: end credits qualified on 73% of frames against 48% for
+a genuinely flashing scene). Strict loses nothing by it — everything the
+default profile reports as an extended flash, strict fails outright.
+
+Three detection profiles are selectable in the header; the choice is used by
+every check, render verdict and verification:
+
+| Profile | WCAG thresholds | Extended flashes |
+| --- | --- | --- |
+| **Exact WCAG + flag extended flashes** (default) | exact | reported as violations: they get their own work sections (labelled *extended flash*), count in the safe/unsafe verdict, and **Suggest** tries to clear them |
+| **Exact WCAG only** | exact | not detected or reported at all — no warning, no marks |
+| **Stricter than WCAG** | tighter (0.08 swing, 1/5 area, 2 flashes/s — extra margin for photosensitive migraine) | not flagged separately — this profile already *fails* at 3 flashes/s |
+
+Because extended flashes are not WCAG failures, verdicts distinguish them: a
+section or exported file whose only remaining problems are extended flashes
+still passes WCAG, and the UI says so while marking it unsafe for the
+active profile.
 
 ## Messy real-world files
 

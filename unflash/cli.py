@@ -1,14 +1,16 @@
 """Command-line interface, mainly for scripted use and testing.
 
-  python -m unflash.cli analyze VIDEO [--start S] [--duration D] [--wcag]
-  python -m unflash.cli scan VIDEO [--wcag]
+  python -m unflash.cli analyze VIDEO [--start S] [--duration D] [--profile P]
+  python -m unflash.cli scan VIDEO [--profile P]
+
+Profiles: wcag_ext (default), wcag, strict.
 """
 
 import argparse
 import json
 import sys
 
-from .config import strict_config, wcag_config
+from .config import DEFAULT_PROFILE, PROFILES, profile_config
 from .analysis import analyze_file, violations_to_sections, timeline_summary
 from . import ffio
 
@@ -21,12 +23,16 @@ def main(argv=None):
         p.add_argument("video")
         p.add_argument("--start", type=float, default=None)
         p.add_argument("--duration", type=float, default=None)
+        p.add_argument("--profile", choices=sorted(PROFILES),
+                       default=DEFAULT_PROFILE,
+                       help="detection profile (default: %(default)s)")
         p.add_argument("--wcag", action="store_true",
-                       help="use exact WCAG thresholds instead of strict")
+                       help="shorthand for --profile wcag "
+                            "(exact WCAG, extended flashes ignored)")
         p.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    cfg = wcag_config() if args.wcag else strict_config()
+    cfg = profile_config("wcag" if args.wcag else args.profile)
     info = ffio.probe(args.video)
 
     def progress(p):

@@ -19,9 +19,15 @@ Method:
   5. A *flash* is a pair of opposing transitions whose regions overlap
      (opposing changes in unrelated screen regions are motion, not flashing).
      Any 1-second period with more than `flash_limit` flashes (general or
-     red, counted separately) is a violation. A 5-second period where >= 80%
-     of frames flash at >= 1/3 of the area threshold is an extended-flash
-     warning.
+     red, counted separately) is a violation.
+  6. An *extended flash* is the same thing one step below the failure rate:
+     flashes passing every criterion above (swing, dark state, concurrent
+     area, coherent window mean) at exactly `flash_limit` per second, whose
+     qualifying moments keep recurring (no gap longer than extended_hold)
+     for >= 80% of a 5-second period. WCAG permits it; sustained flashing at
+     the limit is an ITC/Ofcom hazard, so profiles with
+     extended_mode="section" report it as a violation (its own work section,
+     counted in the safe/unsafe verdict) and extended_mode="off" ignores it.
 
 Timing: event positions are reported in the source's native pts (that is what
 seeking/cutting uses), but flash-frequency windows run on an internal
@@ -59,6 +65,11 @@ class Violation:
     kind: str              # "flash" | "red" | "extended"
     count: float = 0.0     # flashes in the window (or coverage for extended)
 
+    @property
+    def wcag(self):
+        """True for kinds that are WCAG failures (extended flashes are not)."""
+        return self.kind in ("flash", "red")
+
 
 @dataclass
 class AnalysisResult:
@@ -68,14 +79,28 @@ class AnalysisResult:
     duration: float = 0.0
     anomalies: int = 0          # timestamp anomalies bridged during analysis
     frame_stats: dict = field(default_factory=dict)    # arrays for UI charts
+    flag_extended: bool = False   # profile treats extended flashes as
+                                  # violations to fix, not just advisories
+
+    @property
+    def wcag_safe(self):
+        """No WCAG general-flash or red-flash failure."""
+        return all(not v.wcag for v in self.violations)
 
     @property
     def safe(self):
-        return not any(v.kind in ("flash", "red") for v in self.violations)
+        """Passes everything the active profile flags (WCAG failures, plus
+        extended flashes when the profile flags them)."""
+        if not self.wcag_safe:
+            return False
+        return not (self.flag_extended and
+                    any(v.kind == "extended" for v in self.violations))
 
     def to_dict(self, include_stats=False):
         d = {
             "safe": self.safe,
+            "wcag_safe": self.wcag_safe,
+            "flag_extended": self.flag_extended,
             "frames": self.frames,
             "duration": self.duration,
             "anomalies": self.anomalies,
@@ -240,17 +265,21 @@ class _FlashCounter:
             self.pend_pol[rest] = pol
             self.pend_t[rest] = tc
 
-    def strobing(self, tc, fresh_window):
-        """Pixels that are over the rate limit AND flashed just now.
+    def strobing(self, tc, fresh_window, rate=None):
+        """Pixels flashing at least `rate` times a second AND flashed just now.
 
-        The rate check ((limit+1)-th most recent flash under a second old,
-        with an epsilon so exactly-at-limit content passes) finds pixels
-        genuinely flickering too fast. The freshness check makes the WCAG
-        area test *concurrent*: during a pan, pixels exceed neither test
-        together — the freshly-crossed band is thin and mostly under-rate —
-        while a real strobe lights the whole region at once, every cycle.
+        `rate` defaults to K = limit + 1, i.e. over the limit: the K-th most
+        recent flash under a second old (with an epsilon so exactly-at-limit
+        content passes). Pass rate=limit for the extended-flash test, which
+        wants content flashing *at* the permitted rate.
+
+        The freshness check makes the area test *concurrent*: during a pan,
+        pixels exceed neither test together — the freshly-crossed band is
+        thin and mostly under-rate — while a real strobe lights the whole
+        region at once, every cycle.
         """
-        over_rate = (tc - self.ring[self.K - 1]) < (1.0 - 1e-3)
+        k = self.K if rate is None else max(1, min(self.K, int(rate)))
+        over_rate = (tc - self.ring[k - 1]) < (1.0 - 1e-3)
         return over_rate & ((tc - self.last) <= fresh_window)
 
 
@@ -290,6 +319,10 @@ class FlashDetector:
         self.mtrack_red = _ExtremaTracker(self.mean_swing_red * 0.3)
         self.mflash_gen = _FlashCounter(gshape, cfg.flash_limit)
         self.mflash_red = _FlashCounter(gshape, cfg.flash_limit)
+        # extended flashes run one step below the failure rate: "more than
+        # `limit` per second" fails, "at least `limit` per second" sustained
+        # is an extended flash (3/s under exact WCAG, 2/s under strict).
+        self.ext_rate = max(1, int(np.ceil(cfg.flash_limit)))
         self.events = []          # strobing moments (area-qualified)
         self._last_event_tc = {"general": -1e12, "red": -1e12}
         self._above = {"general": False, "red": False}
@@ -302,7 +335,8 @@ class FlashDetector:
         self.stat_red = array("i")
         self.stat_haz = array("i")       # synchronized flash area (general)
         self.stat_haz_red = array("i")   # synchronized flash area (red)
-        self.stat_ext = array("i")       # recently-flashing area (extended)
+        self.stat_ext = array("i")       # area strobing at the permitted
+                                         # rate (extended flash)
         self.stat_ext_red = array("i")
         self.n = 0
         self.anomalies = 0
@@ -409,17 +443,20 @@ class FlashDetector:
                             TransitionEvent(t, tc, 0, kind, best, bbox))
                         self._last_event_tc[kind] = tc
             self._above[kind] = best > 0
-            # recently-flashing area for the extended warning: the window
-            # mean must have flashed at least twice in the trailing second
-            # (>= 1/3 of the failure rate), so mouth-flaps/blinks in
-            # dialogue close-ups don't accumulate into warnings
-            recent = (tc - counter.last) <= 1.0
+            # extended flash: the identical test one step below the failure
+            # rate — pixels flashing AT the permitted rate (not above it),
+            # concurrent, covering the area, with the window mean flashing
+            # at that rate too. Anything the failure test rejects as motion
+            # (pans, scrolling text, cuts, mouth-flaps) is rejected here for
+            # the same reason, so this only fires on real sustained flashing.
             ext_best = 0
-            if recent.any():
-                rcounts = self._window_sums(recent)
-                rcoh = (tc - mflash.ring[1]) <= 1.0
-                rcond = rcounts * rcoh
-                ext_best = int(rcond.max())
+            ext_strobe = counter.strobing(tc, fresh_w, rate=self.ext_rate)
+            if ext_strobe.any():
+                ecounts = self._window_sums(ext_strobe)
+                ecoh = mflash.strobing(tc, max(fresh_w, 0.2),
+                                       rate=self.ext_rate)
+                if ecoh.any():
+                    ext_best = int(np.where(ecoh, ecounts, 0).max())
             if kind == "general":
                 haz, ext_g = best, ext_best
             else:
@@ -466,9 +503,10 @@ class FlashDetector:
             "hazard": self.stat_haz,
             "hazard_red": self.stat_haz_red,
         }
+        res.flag_extended = cfg.flag_extended
         res.violations += self._strobe_violations(self.stat_haz, "flash")
         res.violations += self._strobe_violations(self.stat_haz_red, "red")
-        res.violations += self._extended_warnings()
+        res.violations += self._extended_violations()
         res.violations.sort(key=lambda v: v.start)
         return res
 
@@ -492,18 +530,34 @@ class FlashDetector:
             cur_end_tc = tc
         return out
 
-    def _extended_warnings(self):
-        """ITC/Ofcom-style extended flash: >= 80% of frames over 5 s with
-        *actual flashing* (pixels that completed flash pairs within the last
-        second) covering at least a third of the failure area."""
+    def _extended_violations(self):
+        """ITC/Ofcom-style extended flash: flashing that meets every failure
+        criterion except the rate — it runs at `flash_limit` per second
+        instead of above it — sustained for `extended_window` seconds.
+
+        A frame counts as flashing while the last qualifying strobe is less
+        than `extended_hold` seconds old, so the separate strobe moments of a
+        real 3 Hz flicker join up, while a one-off transition decays after a
+        second and cannot fill a 5-second window on its own.
+
+        Profiles with extended_mode="off" skip this entirely, so exact-WCAG
+        runs never report a hazard the WCAG verdict does not act on."""
         cfg = self.cfg
-        if self.n == 0:
+        if self.n == 0 or not cfg.flag_extended:
             return []
-        third = self.area_thresh * cfg.extended_area_ratio
+        area = self.area_thresh * cfg.extended_area_ratio
         t = np.asarray(self.stat_t)
         tc = np.asarray(self.stat_tc)
-        flashy = (np.asarray(self.stat_ext) >= third) | \
-            (np.asarray(self.stat_ext_red) >= third)
+        hit = (np.asarray(self.stat_ext) >= area) | \
+            (np.asarray(self.stat_ext_red) >= area)
+        # hold each qualifying strobe for extended_hold seconds, so the test
+        # below measures "flashing kept recurring", not "flashed once"
+        flashy = np.zeros(self.n, bool)
+        last = -1e12
+        for i in range(self.n):
+            if hit[i]:
+                last = tc[i]
+            flashy[i] = (tc[i] - last) <= cfg.extended_hold
         out = []
         n = self.n
         j = 0
@@ -588,13 +642,13 @@ def violations_to_sections(violations, cfg, bounds, keyframes=None):
     """Merge violations into padded work sections.
     `bounds` = (ts_min, ts_max): the video's real native-pts range.
 
-    Extended-flash warnings are advisory (not part of WCAG) and do NOT
-    create sections — only actual flash/red failures do.
+    Extended flashes create sections only when the profile flags them
+    (extended_mode="section"); otherwise they are not reported at all.
     """
     ts_min, ts_max = bounds
     intervals = []
     for v in violations:
-        if v.kind == "extended":
+        if v.kind == "extended" and not cfg.flag_extended:
             continue
         s = max(ts_min, v.start - cfg.section_pad)
         e = min(ts_max, v.end + cfg.section_pad)

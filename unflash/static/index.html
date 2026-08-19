@@ -15,8 +15,9 @@
   <div class="spacer"></div>
   <label class="profile-label" title="Notify + beep when an operation takes longer than this many minutes">🔔≥<input type="number" id="notifyMin" min="0" step="1" style="width:3.2em"> min</label>
   <label class="profile-label">Profile
-    <select id="profileSel">
-      <option value="wcag">Exact WCAG (default)</option>
+    <select id="profileSel" title="Which hazards the detector flags. Extended flashes are not WCAG failures, but they still affect some photosensitive viewers.">
+      <option value="wcag_ext">Exact WCAG + flag extended flashes (default)</option>
+      <option value="wcag">Exact WCAG only</option>
       <option value="strict">Stricter than WCAG</option>
       <option value="custom" disabled hidden>Custom</option>
     </select>
@@ -138,13 +139,14 @@
     <h1>Unflash</h1>
     <p>Detect and repair photosensitive-hazard flashing in videos.</p>
     <ol>
-      <li>Open a video and <b>Scan</b> it — problem sections are found automatically (WCAG 2.x general-flash, red-flash and extended-flash analysis). You can also add sections by dragging on the timeline or typing timestamps.</li>
+      <li>Open a video and <b>Scan</b> it — problem sections are found automatically (WCAG 2.x general-flash and red-flash analysis, plus extended flashes unless the profile is <i>Exact WCAG only</i>). You can also add sections by dragging on the timeline or typing timestamps.</li>
       <li>Open a section and <b>Prepare</b> it (proxy + thumbnails + per-frame analysis) — or use <b>prepare all</b> in the sidebar.</li>
       <li>Use <b>Suggest</b> (keep-light or keep-dark, optionally restricted to your selection) or mark frames yourself: removed frames are replaced by the last kept frame; extended frames linger for 1&nbsp;s with silent audio.</li>
       <li><b>Check safety</b> instantly, then <b>Preview render</b> to watch the result. If a check fails, <b>select unsafe frames</b> shows you exactly where the remaining problems are.</li>
       <li><b>Render full-res</b> — this must be done for <b>every</b> section before exporting (<b>render all</b> in the sidebar does them all, skipping up-to-date ones). Sections whose edits changed after rendering are flagged <i>render stale</i>; re-render them.</li>
       <li><b>Export</b> stitches the rendered sections back into the untouched video, then <b>Verify</b> re-scans the final file.</li>
     </ol>
+    <p class="note-extended"><b>Extended flashes</b> are 5&nbsp;s or longer of flashing that meets every WCAG failure criterion except the rate — it runs <i>at</i> the permitted rate (3&nbsp;flashes/s) instead of above it. WCAG does not fail them, but ITC/Ofcom guidance treats them as a hazard, so the default profile flags them as ordinary work sections (labelled <i>extended flash</i>) that you can edit, check and render like any other. Pick <i>Exact WCAG only</i> if you want them ignored completely. <i>Stricter than WCAG</i> does not flag them either — it already fails outright at the rate the extended test looks for.</p>
     <p class="disclaimer">This tool reduces risk; it cannot guarantee safety. It does not detect hazardous static patterns (e.g.&nbsp;fine stripes), and individual sensitivity varies — review flagged sections yourself before sharing.</p>
   </section>
 </main>

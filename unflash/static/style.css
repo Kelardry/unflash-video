@@ -81,6 +81,7 @@ aside#sections {
 .badge { padding: 0 6px; border-radius: 8px; font-size: 10px; line-height: 16px; }
 .badge.kind { background: #4a3520; color: var(--warn); }
 .badge.kind.red { background: #45202e; color: #ff7aa0; }
+.badge.kind.ext { background: #2e3550; color: #9db2ff; }
 .badge.ok { background: #1d3a2d; color: var(--ok); }
 .badge.bad { background: #402024; color: var(--bad); }
 .badge.warn { background: #4a3520; color: var(--warn); }
@@ -102,6 +103,8 @@ aside#sections {
 #workspace { flex: 1; padding: 14px 18px; overflow-y: auto; min-width: 0; }
 #welcome { flex: 1; padding: 40px; max-width: 46em; }
 #welcome .disclaimer { color: var(--warn); border: 1px solid #4a3520;
+  border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+#welcome .note-extended { color: var(--fg-dim); border: 1px solid #2c313c;
   border-radius: 8px; padding: 10px 12px; font-size: 13px; }
 .ws-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .verdict { font-weight: 700; padding: 2px 10px; border-radius: 10px; }

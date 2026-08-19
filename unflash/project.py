@@ -7,8 +7,36 @@ import os
 import threading
 import time
 
-from .config import DetectorConfig, RenderConfig
+from .config import (DEFAULT_PROFILE, PROFILES, DetectorConfig,
+                     RenderConfig, profile_config, profile_name)
 from . import ffio
+
+
+# The extended-flash settings are not chosen directly -- they come with the
+# profile -- and their definition has changed since projects started being
+# saved, so a project is identified by the thresholds that name a profile and
+# then takes that profile's current extended settings.
+PROFILE_FIELDS = tuple(f for f in DetectorConfig().to_dict()
+                       if not f.startswith("extended_"))
+
+
+def _snap_to_profile(merged, saved):
+    """The named profile whose thresholds this project already uses, as a
+    full settings dict. wcag and wcag_ext share thresholds, so a saved
+    extended_mode breaks the tie; a project from before that setting existed
+    takes the current default profile. No match -> left as it was."""
+    matches = [name for name, factory in PROFILES.items()
+               if all(merged[f] == factory().to_dict()[f]
+                      for f in PROFILE_FIELDS)]
+    if not matches:
+        return merged
+    if len(matches) > 1:
+        mode = saved.get("extended_mode")
+        tie = [n for n in matches if profile_config(n).extended_mode == mode]
+        if not tie:
+            tie = [n for n in matches if n == DEFAULT_PROFILE]
+        matches = tie or matches
+    return profile_config(matches[0]).to_dict()
 
 
 def workdir_for(video_path):
@@ -63,8 +91,27 @@ class Project:
                     stored = json.load(f)
                 if os.path.abspath(stored.get("video_path", "")) == self.video_path:
                     self.data.update(stored)
+                    self._migrate_settings()
             except (json.JSONDecodeError, OSError):
                 pass
+
+    def _migrate_settings(self):
+        """Fill in settings added after the project was saved, so an older
+        project still matches a named profile instead of reading as custom.
+
+        A project whose profile-identifying thresholds match a named profile
+        also adopts that profile's current extended-flash settings: those are
+        not chosen directly (they come with the profile) and their definition
+        has changed. Genuinely custom thresholds match no profile and are
+        left exactly as saved."""
+        for key, defaults in (("detector", DetectorConfig().to_dict()),
+                              ("render", RenderConfig().to_dict())):
+            saved = {k: v for k, v in (self.data.get(key) or {}).items()
+                     if k in defaults}
+            merged = {**defaults, **saved}
+            if key == "detector" and profile_name(merged) == "custom":
+                merged = _snap_to_profile(merged, saved)
+            self.data[key] = merged
 
     def save(self):
         with self.lock:

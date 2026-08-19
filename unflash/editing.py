@@ -149,9 +149,11 @@ def _region_metric(frames, idxs, bbox):
 
 
 def _violation_spans(result, pad=0.3):
+    """Time spans the suggester should work on: WCAG failures always, plus
+    extended flashes when the active profile flags them."""
     spans = []
     for v in result.violations:
-        if v.kind == "extended":
+        if v.kind == "extended" and not result.flag_extended:
             continue
         spans.append([v.start - pad, v.end + pad])
     spans.sort()
@@ -283,9 +285,6 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
                 + ("try widening the selection or edit manually."
                    if only_set is not None else "needs manual attention."))
 
-    warn = [v for v in result.violations if v.kind == "extended"]
-    if result.safe and warn:
-        note += " (extended-flash warning remains; consider more removals)"
     return {
         "edits": {str(i): {"removed": True, "extended": False}
                   for i in sorted(removed)},
@@ -322,7 +321,7 @@ def check_section(project, sid, edits=None):
             off += ext_s
     flagged = set()
     for v in result.violations:
-        if v.kind == "extended":
+        if v.kind == "extended" and not result.flag_extended:
             continue
         for i, t in enumerate(disp):
             if v.start - 0.05 <= t <= v.end + 0.05:

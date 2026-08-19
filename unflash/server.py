@@ -15,7 +15,7 @@ from flask import (Flask, jsonify, request, send_file, send_from_directory,
 
 from . import ffio
 from .analysis import analyze_file, violations_to_sections, timeline_summary
-from .config import wcag_config, strict_config, profile_name
+from .config import profile_config, profile_name
 from .editing import prepare_section, suggest_edits, check_section
 from .jobs import JobManager
 from .project import Project
@@ -164,11 +164,11 @@ def _section_summary(s):
 @app.post("/api/settings")
 def update_settings():
     data = request.get_json(force=True) or {}
-    if data.get("profile") == "wcag":
-        proj().data["detector"] = wcag_config().to_dict()
-        proj().save()
-    elif data.get("profile") == "strict":
-        proj().data["detector"] = strict_config().to_dict()
+    if data.get("profile"):
+        cfg = profile_config(data["profile"])
+        if cfg is None:
+            return _err(f"Unknown detection profile {data['profile']!r}", 400)
+        proj().data["detector"] = cfg.to_dict()
         proj().save()
     proj().update_settings(detector=data.get("detector"),
                            render=data.get("render"))
@@ -225,9 +225,11 @@ def scan():
                     created += 1
             p.save()
         n_ext = sum(1 for v in res.violations if v.kind == "extended")
-        return {"safe": res.safe, "sections_created": created,
+        return {"safe": res.safe, "wcag_safe": res.wcag_safe,
+                "sections_created": created,
                 "violations": len(res.violations) - n_ext,
-                "extended_advisories": n_ext}
+                "extended": n_ext,
+                "flag_extended": res.flag_extended}
 
     job = jobs.start("scan", run)
     return jsonify({"job": job.id})

@@ -198,8 +198,13 @@ $("btnOpen").onclick = async () => {
 
 $("profileSel").onchange = async () => {
   try {
-    await api("/api/settings", "POST", { profile: $("profileSel").value });
-    toast("Detection profile changed — re-scan and re-prepare sections to apply it.");
+    const prof = $("profileSel").value;
+    const r = await api("/api/settings", "POST", { profile: prof });
+    let msg = "Detection profile changed — re-scan and re-prepare sections to apply it.";
+    if (r.detector && r.detector.extended_mode === "off") {
+      msg += " This profile does not report extended flashes; sections already created for them stay until you delete them.";
+    }
+    toast(msg);
   } catch (e) { toast(e.message, true); }
 };
 
@@ -207,17 +212,62 @@ $("btnScan").onclick = async () => {
   try {
     const r = await api("/api/scan", "POST", {});
     pollJob(r.job, "Scanning", (res) => {
-      let msg = res.safe
-        ? "Scan complete: no violations found 🎉"
-        : `Scan complete: ${res.violations} violation window(s), ${res.sections_created} new section(s).`;
-      if (res.extended_advisories) {
-        msg += ` ${res.extended_advisories} extended-flash advisories (gray timeline marks — informational, no sections).`;
+      let msg;
+      if (res.safe) {
+        msg = "Scan complete: no violations found 🎉";
+      } else {
+        const bits = [];
+        if (res.violations) bits.push(plural(res.violations,
+          "WCAG violation window", "WCAG violation windows"));
+        if (res.extended) bits.push(plural(res.extended,
+          "extended flash", "extended flashes"));
+        msg = `Scan complete: ${bits.join(" + ")}, `
+          + `${plural(res.sections_created, "new section", "new sections")}.`;
+        if (res.extended && !res.flag_extended) {
+          msg += " Extended flashes are informational under this profile (gray timeline marks, no sections).";
+        } else if (res.extended) {
+          msg += " Extended flashes pass WCAG but are hazardous for some viewers — their sections are marked 'extended flash'.";
+        }
       }
       toast(msg);
       refreshProject();
     });
   } catch (e) { toast(e.message, true); }
 };
+
+// ---------- violation wording ----------
+// "extended" is an extended flash (sustained sub-threshold flashing), not the
+// frame-extension edit of the same name.
+const KIND_LABELS = { flash: "general flash", red: "red flash",
+                      extended: "extended flash" };
+function kindLabel(k) { return KIND_LABELS[k] || k; }
+
+function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+
+// compact form for the sidebar badges ("manual" and "flash" read fine as-is;
+// "extended" alone would be mistaken for the frame-extension edit)
+function kindBadge(k) { return k === "extended" ? "extended flash" : k; }
+
+// Split a verdict's violations into WCAG failures and extended flashes.
+function splitViolations(res) {
+  const all = res.violations || [];
+  return {
+    wcag: all.filter((x) => x.kind !== "extended"),
+    ext: all.filter((x) => x.kind === "extended"),
+  };
+}
+
+// "2 WCAG violation window(s) + 1 extended flash" — extended flashes are only
+// mentioned when the active profile flags them (otherwise none are reported).
+function violationPhrase(res) {
+  const { wcag, ext } = splitViolations(res);
+  const bits = [];
+  if (wcag.length) bits.push(plural(wcag.length, "WCAG violation window",
+                                    "WCAG violation windows"));
+  if (ext.length && res.flag_extended)
+    bits.push(plural(ext.length, "extended flash", "extended flashes"));
+  return bits.join(" + ") || "no violations";
+}
 
 // ---------- timeline ----------
 function drawTimeline() {
@@ -247,7 +297,8 @@ function drawTimeline() {
       ctx.fillRect(x0, H - 6 - h, Math.max(1, x1 - x0), h);
     }
   }
-  // extended-flash advisories: dim gray strips along the top (informational)
+  // extended flashes: dim gray strips along the top (they also get their own
+  // sections when the profile flags them)
   if (scan && scan.violations) {
     ctx.fillStyle = "rgba(150,155,170,.35)";
     for (const v of scan.violations) {
@@ -326,7 +377,8 @@ function renderSectionList() {
     const el = document.createElement("div");
     el.className = "section-item" + (s.id === state.sectionId ? " active" : "");
     const badges = [];
-    for (const k of s.kinds || []) badges.push(`<span class="badge kind ${k}">${k}</span>`);
+    for (const k of s.kinds || [])
+      badges.push(`<span class="badge kind ${k === "extended" ? "ext" : k}">${kindBadge(k)}</span>`);
     if (!s.prepared) badges.push('<span class="badge neutral">unprepared</span>');
     if (s.n_edits) badges.push(`<span class="badge neutral">${s.n_edits} edits</span>`);
     if (s.check_safe === true) badges.push('<span class="badge ok">check ✓</span>');
@@ -832,10 +884,12 @@ $("btnCheck").onclick = () => {
       setVerdict(res.safe);
       if (state.section) state.section.check = res;
       updateUnsafeBtn();
-      const v = res.violations.filter((x) => x.kind !== "extended");
-      const w = res.violations.filter((x) => x.kind === "extended");
-      let msg = res.safe ? "Passes the detector." : `Fails: ${v.length} violation window(s) — use "select unsafe frames" to see them.`;
-      if (w.length) msg += ` ${w.length} extended-flash warning(s).`;
+      let msg = res.safe
+        ? "Passes the detector."
+        : `Fails: ${violationPhrase(res)} — use "select unsafe frames" to see them.`;
+      if (!res.safe && res.wcag_safe) {
+        msg += " (No WCAG failure left — what remains is extended flashing.)";
+      }
       toast(msg, !res.safe);
       refreshBadges();
     }))
@@ -848,7 +902,7 @@ $("btnPreview").onclick = () => {
     .then((r) => pollJob(r.job, "Rendering preview", (res) => {
       const safe = res.verdict && res.verdict.safe;
       toast(safe ? "Preview rendered — passes the detector ✓"
-                 : "Preview rendered — still FAILS the detector", !safe);
+                 : `Preview rendered — still FAILS the detector (${violationPhrase(res.verdict || {})})`, !safe);
       api(`/api/section/${sid}`).then((d) => {
         state.section = d.section;
         setPlayerSource("preview");
@@ -863,7 +917,7 @@ $("btnRender").onclick = () => {
     .then((r) => pollJob(r.job, "Rendering full resolution", (res) => {
       const safe = res.verdict && res.verdict.safe;
       let msg = safe ? "Full render complete — passes the detector ✓"
-                     : "Full render complete — still FAILS the detector";
+                     : `Full render complete — still FAILS the detector (${violationPhrase(res.verdict || {})})`;
       if (res.warning) msg += ` (${res.warning})`;
       toast(msg, !safe);
       refreshProject(sid);
@@ -942,10 +996,21 @@ $("btnVerifyExport").onclick = async () => {
   try {
     const r = await api("/api/verify_export", "POST", {});
     pollJob(r.job, "Verifying export", (res) => {
-      const v = res.violations.filter((x) => x.kind !== "extended");
-      $("exportResult").textContent = (res.safe
-        ? `✓ Exported file passes the detector (profile: ${res.profile}).`
-        : `✗ Exported file still fails (profile: ${res.profile}): ${v.map((x) => `${x.kind} ${fmtTime(x.start)}–${fmtTime(x.end)}`).join(", ")}`);
+      const { wcag, ext } = splitViolations(res);
+      const shown = res.flag_extended ? wcag.concat(ext) : wcag;
+      shown.sort((a, b) => a.start - b.start);
+      let txt;
+      if (res.safe) {
+        txt = `✓ Exported file passes the detector (profile: ${res.profile}).`;
+      } else {
+        txt = `✗ Exported file still fails (profile: ${res.profile}): `
+          + shown.map((x) => `${kindLabel(x.kind)} ${fmtTime(x.start)}–${fmtTime(x.end)}`).join(", ");
+        if (res.wcag_safe) {
+          txt += "\nThese pass WCAG but are extended flashes — add or open the "
+            + "sections covering those times, edit them, then re-render and re-export.";
+        }
+      }
+      $("exportResult").textContent = txt;
     });
   } catch (e) { toast(e.message, true); }
 };
