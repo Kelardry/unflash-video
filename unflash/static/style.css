@@ -94,8 +94,14 @@ aside#sections {
 .badge.bad { background: #402024; color: var(--bad); }
 .badge.warn { background: #4a3520; color: var(--warn); }
 .badge.neutral { background: #2c313c; color: var(--fg-dim); }
-.side-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.side-head h2 { margin: 0; }
+/* header on its own line so the three do-all buttons fit across the sidebar
+   instead of overflowing it sideways; they share the row evenly and wrap
+   rather than overflow if the text ever gets bigger */
+.side-head { display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  margin-bottom: 8px; }
+.side-head h2 { margin: 0 0 2px; flex-basis: 100%; }
+.side-head button.small { flex: 1 0 auto; font-size: 11px; padding: 3px 6px;
+  white-space: nowrap; }
 .timeline-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .addsec { display: flex; gap: 4px; align-items: center; padding-bottom: 4px; }
 .addsec input { font-size: 11px; padding: 2px 6px; }
