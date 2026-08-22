@@ -26,7 +26,12 @@ async function api(path, method = "GET", body = null) {
   }
   const r = await fetch(path, opt);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || r.statusText);
+  if (!r.ok) {
+    const err = new Error(data.error || r.statusText);
+    err.status = r.status;
+    err.needVideo = !!data.need_video;   // project folder without its video
+    throw err;
+  }
   return data;
 }
 
@@ -176,23 +181,65 @@ async function refreshProject(openSid = null) {
   else if (state.sectionId && p.sections[state.sectionId]) openSection(state.sectionId);
 }
 
+// notes from opening a project (relinked paths, missing files, …)
+function showNotes(notes) {
+  const el = $("banner");
+  if (!notes || !notes.length) { el.classList.add("hidden"); return; }
+  $("bannerText").innerHTML = notes.map((n) =>
+    `<div>⚠ ${n.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}</div>`).join("");
+  el.classList.remove("hidden");
+}
+$("btnCloseBanner").onclick = () => $("banner").classList.add("hidden");
+
+async function pickVideoPath() {
+  const r = await api("/api/pick", "POST", {});
+  if (r.path) return r.path;
+  if (r.error) toast(r.error, true);
+  // picker failed or was cancelled — offer a paste-a-path fallback
+  return prompt("Or paste the full path of the video file:");
+}
+
+async function afterOpen(res, msg) {
+  state.sectionId = null;
+  $("workspace").classList.add("hidden");
+  $("welcome").classList.remove("hidden");
+  await refreshProject();
+  showNotes(res.notes);
+  toast(msg);
+}
+
 $("btnOpen").onclick = async () => {
   try {
-    const r = await api("/api/pick", "POST", {});
+    const path = await pickVideoPath();
+    if (!path) return;
+    toast("Opening video… (large or unusual files can take a moment)");
+    const res = await api("/api/open", "POST", { path });
+    await afterOpen(res, "Video opened. Run a scan to find problem sections.");
+  } catch (e) { toast(e.message, true); }
+};
+
+$("btnOpenProject").onclick = async () => {
+  try {
+    const r = await api("/api/pick_dir", "POST", {});
     let path = r.path;
     if (!path) {
       if (r.error) toast(r.error, true);
-      // picker failed or was cancelled — offer a paste-a-path fallback
-      path = prompt("Or paste the full path of the video file:");
+      path = prompt("Or paste the full path of the .unflash project folder:");
       if (!path) return;
     }
-    toast("Opening video… (large or unusual files can take a moment)");
-    await api("/api/open", "POST", { path });
-    state.sectionId = null;
-    $("workspace").classList.add("hidden");
-    $("welcome").classList.remove("hidden");
-    await refreshProject();
-    toast("Video opened. Run a scan to find problem sections.");
+    toast("Opening project…");
+    let res;
+    try {
+      res = await api("/api/open_project", "POST", { path });
+    } catch (e) {
+      if (!e.needVideo) throw e;
+      // the folder was moved away from its video: ask which video it is now
+      toast(e.message, true);
+      const video = await pickVideoPath();
+      if (!video) return;
+      res = await api("/api/open_project", "POST", { path, video });
+    }
+    await afterOpen(res, "Project opened from " + path);
   } catch (e) { toast(e.message, true); }
 };
 

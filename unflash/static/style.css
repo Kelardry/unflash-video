@@ -49,6 +49,14 @@ header {
 .profile-label { color: var(--fg-dim); font-size: 12px; display: flex;
   align-items: center; gap: 6px; }
 
+.banner {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 8px 16px; background: #2a2417; border-bottom: 1px solid #5c4a24;
+  color: #f3e2bd; font-size: 13px; max-height: 30vh; overflow: auto;
+}
+.banner > div { flex: 1; }
+.banner > div > div { margin: 2px 0; }
+
 .jobbar {
   display: flex; align-items: center; gap: 12px;
   padding: 6px 16px; background: #1a2430; border-bottom: 1px solid #24405c;
@@ -104,8 +112,10 @@ aside#sections {
 #welcome { flex: 1; padding: 40px; max-width: 46em; }
 #welcome .disclaimer { color: var(--warn); border: 1px solid #4a3520;
   border-radius: 8px; padding: 10px 12px; font-size: 13px; }
-#welcome .note-extended { color: var(--fg-dim); border: 1px solid #2c313c;
+#welcome .note-extended, #welcome .note-resume {
+  color: var(--fg-dim); border: 1px solid #2c313c;
   border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+#welcome code { background: var(--bg); border-radius: 3px; padding: 0 4px; }
 .ws-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .verdict { font-weight: 700; padding: 2px 10px; border-radius: 10px; }
 .verdict.safe { background: #1d3a2d; color: var(--ok); }

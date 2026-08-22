@@ -1,24 +1,30 @@
 """Local web UI server.
 
   python -m unflash.server [--port 8765] [--no-browser]
+
+One server per signed-in account: it picks a port no one else holds and only
+serves requests carrying this account's token (see instance.py), so accounts
+sharing a PC cannot see each other's projects or pop file dialogs onto each
+other's desktops.
 """
 
 import argparse
 import os
+import secrets
 import subprocess
 import sys
 import threading
 import webbrowser
 
-from flask import (Flask, jsonify, request, send_file, send_from_directory,
-                   abort)
+from flask import (Flask, Response, jsonify, redirect, request, send_file,
+                   send_from_directory, abort)
 
-from . import ffio
+from . import ffio, instance
 from .analysis import analyze_file, violations_to_sections, timeline_summary
 from .config import profile_config, profile_name
 from .editing import prepare_section, suggest_edits, check_section
 from .jobs import JobManager
-from .project import Project
+from .project import Project, project_dir_video
 from .render import (render_section, export_video, verify_file,
                      filter_assembly_estimate)
 
@@ -27,6 +33,9 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 state = {"project": None}
 jobs = JobManager()
+
+# this server's identity; token None means the check is off (--no-token)
+INSTANCE = {"token": None, "port": None, "host": "127.0.0.1"}
 
 
 def proj() -> Project:
@@ -50,11 +59,69 @@ def handle_error(e):
     return jsonify({"error": str(e)}), 500
 
 
+# --- access ------------------------------------------------------------------
+
+BLOCKED_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Unflash — not your session</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:34em;margin:12vh auto;
+padding:0 1.5em;color:#ddd;background:#1b1c1f}code{background:#000;padding:
+.1em .4em;border-radius:3px}</style></head><body>
+<h1>This Unflash server is not yours</h1>
+<p>It was started by a different account signed in to this PC. Its projects,
+its file dialogs and its browse windows belong to that account, so it will not
+serve this page.</p>
+<p>Start your own copy (<code>run_unflash.bat</code>) — it will take the next
+free port and open the right address for you.</p>
+</body></html>"""
+
+
+def _cookie_name():
+    # cookies ignore the port, so two accounts on 127.0.0.1 would otherwise
+    # share (and clobber) one cookie
+    return f"unflash_token_{INSTANCE.get('port') or 0}"
+
+
+@app.before_request
+def _check_token():
+    tok = INSTANCE.get("token")
+    if not tok:
+        return None
+    # any of the three carriers may hold it: a stale token in a bookmarked
+    # URL must not lock out a browser whose cookie is still good
+    offered = (request.headers.get("X-Unflash-Token"),
+               request.args.get("token"),
+               request.cookies.get(_cookie_name()))
+    if any(g and secrets.compare_digest(g, tok) for g in offered):
+        return None
+    if request.path.startswith(("/api/", "/media/", "/thumb/")):
+        return jsonify({"error": "This Unflash server belongs to another "
+                                 "account signed in to this PC."}), 403
+    return Response(BLOCKED_HTML, status=403, mimetype="text/html")
+
+
+@app.get("/api/instance")
+def instance_info():
+    """Reached only with a valid token, so a 200 here means "this server is
+    yours" — that is how a second launch finds its own server."""
+    return jsonify({"unflash": True, "pid": os.getpid(),
+                    "port": INSTANCE.get("port")})
+
+
 # --- static ------------------------------------------------------------------
 
 @app.get("/")
 def index():
-    return send_from_directory(STATIC_DIR, "index.html")
+    tok = INSTANCE.get("token")
+    if tok and request.args.get("token"):
+        # keep the token out of the address bar / history; the cookie carries
+        # it from here on
+        resp = redirect("/")
+    else:
+        resp = send_from_directory(STATIC_DIR, "index.html")
+    if tok:
+        resp.set_cookie(_cookie_name(), tok, max_age=90 * 24 * 3600,
+                        httponly=True, samesite="Lax", path="/")
+    return resp
 
 
 @app.get("/static/<path:name>")
@@ -88,6 +155,32 @@ def pick_file():
     return jsonify({"path": path or None, "error": err})
 
 
+@app.post("/api/pick_dir")
+def pick_dir():
+    """Native folder dialog, for choosing an existing .unflash project."""
+    data = request.get_json(silent=True) or {}
+    initial = data.get("initial") or ""
+    code = (
+        "import tkinter as tk, tkinter.filedialog as fd\n"
+        "r=tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+        "p=fd.askdirectory(title='Select an existing .unflash project "
+        f"folder', initialdir={initial!r} or None, mustexist=True)\n"
+        "print(p or '')"
+    )
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return jsonify({"path": None, "error": "Folder dialog timed out"})
+    path = (r.stdout or "").strip()
+    err = None
+    if not path and r.returncode != 0:
+        err = ("Folder dialog failed: "
+               + (r.stderr or "").strip()[-300:] or "unknown error")
+    return jsonify({"path": os.path.normpath(path) if path else None,
+                    "error": err})
+
+
 @app.post("/api/pick_save")
 def pick_save():
     data = request.get_json(force=True) or {}
@@ -105,6 +198,22 @@ def pick_save():
     return jsonify({"path": path or None})
 
 
+def _activate(project, label):
+    """Make a freshly built project the open one, indexing it if the
+    container has no usable duration."""
+    info = project.data["info"]
+    if not info.get("duration") or info["duration"] <= 0:
+        # some files (e.g. streamed webm) have no duration metadata; index the
+        # packets right away so the timeline has real bounds
+        try:
+            project.ensure_index()
+        except Exception as e:  # noqa: BLE001
+            return _err(f"'{label}' has no duration and packet indexing "
+                        f"failed: {e}", 400)
+    state["project"] = project
+    return jsonify({"project": _project_payload(), "notes": project.notes})
+
+
 @app.post("/api/open")
 def open_video():
     data = request.get_json(force=True) or {}
@@ -115,24 +224,52 @@ def open_video():
         project = Project(path)
     except Exception as e:  # noqa: BLE001 - reported to the UI
         return _err(f"Could not open '{os.path.basename(path)}': {e}", 400)
-    # some files (e.g. streamed webm) have no duration metadata; index the
-    # packets right away so the timeline has real bounds
-    info = project.data["info"]
-    if not info.get("duration") or info["duration"] <= 0:
-        try:
-            project.ensure_index()
-        except Exception as e:  # noqa: BLE001
-            return _err(f"'{os.path.basename(path)}' has no duration and "
-                        f"packet indexing failed: {e}", 400)
-    state["project"] = project
-    return project_state()
+    return _activate(project, os.path.basename(path))
+
+
+@app.post("/api/open_project")
+def open_project():
+    """Open an existing ``<name>.unflash`` folder chosen by the user, e.g.
+    one that was moved away from its video or never picked up automatically.
+    Paths recorded inside it are re-pointed at where the files are now."""
+    data = request.get_json(force=True) or {}
+    d = (data.get("path") or "").strip().strip('"')
+    if not d or not os.path.isdir(d):
+        return _err(f"Not a folder: {d}", 404)
+    d = os.path.abspath(os.path.normpath(d))
+    name = os.path.basename(d)
+    if not os.path.exists(os.path.join(d, "project.json")):
+        return _err(f"'{name}' is not an Unflash project folder — it has no "
+                    f"project.json inside. Pick the '<video name>.unflash' "
+                    f"folder itself, not the folder containing it.", 400)
+
+    video = (data.get("video") or "").strip().strip('"') or None
+    if video and not os.path.isfile(video):
+        return _err(f"Video file not found: {video}", 404)
+    if not video:
+        video, stored = project_dir_video(d)
+        if not video:
+            missing = f" It was made from '{stored}'." if stored else ""
+            return jsonify({
+                "error": f"Could not find the video for '{name}'.{missing} "
+                         f"Pick the video file it belongs to.",
+                "need_video": True, "stored": stored}), 400
+    try:
+        project = Project(video, workdir=d, adopt=True)
+    except Exception as e:  # noqa: BLE001 - reported to the UI
+        return _err(f"Could not open project '{name}': {e}", 400)
+    return _activate(project, os.path.basename(video))
 
 
 @app.get("/api/project")
 def project_state():
+    return jsonify({"project": _project_payload()})
+
+
+def _project_payload():
     p = state["project"]
     if p is None:
-        return jsonify({"project": None})
+        return None
     d = dict(p.data)
     # trim heavy per-section fields for the overview
     d["sections"] = {sid: _section_summary(s)
@@ -142,7 +279,7 @@ def project_state():
     d["bounds"] = list(p.bounds)
     d["profile"] = profile_name(p.data["detector"])
     d.pop("keyframes", None)
-    return jsonify({"project": d})
+    return d
 
 
 def _section_summary(s):
@@ -523,22 +660,100 @@ def jobs_list():
     return jsonify({"jobs": [j.to_dict() for j in jobs.active()]})
 
 
+def _bind(host, ports):
+    """First port in ``ports`` we can actually listen on."""
+    from werkzeug.serving import BaseWSGIServer, make_server
+    if os.name == "nt":
+        # Windows would otherwise let us bind a port another account is
+        # already serving on, and then split connections between the two
+        BaseWSGIServer.allow_reuse_address = False
+    last = None
+    tried = 0
+    for p in ports:
+        tried += 1
+        try:
+            return make_server(host, p, app, threaded=True), p
+        except OSError as e:
+            last = e
+        except SystemExit as e:
+            # werkzeug turns "address in use" into its own message + exit;
+            # keep scanning instead of giving up on the first collision
+            last = e.code if isinstance(e.code, str) else f"port {p} in use"
+    raise SystemExit(
+        f"Could not open a port for the Unflash server after {tried} "
+        f"attempt(s): {last or 'every candidate port was already in use'}"
+        + ("\nDrop --port to let it pick a free one." if tried == 1 else ""))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=None,
+                    help=f"fixed port; the default is "
+                         f"{instance.DEFAULT_PORT}, or the next free one up "
+                         f"if another account is already holding it")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--video", help="open this video on startup")
+    ap.add_argument("--new", action="store_true",
+                    help="start a second server even if this account already "
+                         "has one running")
+    ap.add_argument("--no-token", action="store_true",
+                    help="serve without the per-account token: any account "
+                         "signed in to this PC can then use this server, its "
+                         "projects and its file dialogs")
     args = ap.parse_args(argv)
+
+    token = None if args.no_token else instance.user_token()
+
+    # already running for this account? hand the video over and re-open the
+    # browser on it rather than starting a second copy
+    if token and not args.new and args.port is None:
+        own = instance.find_own(args.host, token)
+        if own:
+            url = f"http://{args.host}:{own}/"
+            print(f"Unflash is already running for this account at {url}")
+            if args.video:
+                err = instance.post(args.host, own, token, "/api/open",
+                                    {"path": os.path.abspath(args.video)})
+                if err:
+                    print(f"Could not open {args.video} there: {err}")
+            if not args.no_browser:
+                webbrowser.open(f"{url}?token={token}")
+            return 0
 
     if args.video:
         state["project"] = Project(args.video)
 
-    url = f"http://{args.host}:{args.port}/"
-    if not args.no_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    if args.port is not None:
+        ports = [args.port]
+    else:
+        ports = instance.candidate_ports(args.host, instance.DEFAULT_PORT)
+    srv, port = _bind(args.host, ports)
+    INSTANCE.update({"token": token, "port": port, "host": args.host})
+    if token:
+        instance.save_state(host=args.host, port=port, pid=os.getpid())
+
+    url = f"http://{args.host}:{port}/"
     print(f"Unflash running at {url}")
-    app.run(host=args.host, port=args.port, threaded=True)
+    if port != instance.DEFAULT_PORT and args.port is None:
+        print(f"(port {instance.DEFAULT_PORT} was taken — another account "
+              f"signed in to this PC is probably running Unflash too)")
+    if token:
+        print("This server is private to your account. If the page ever says "
+              "it is not yours, re-open it with:")
+        print(f"  {url}?token={token}")
+    else:
+        print("WARNING: --no-token — any account signed in to this PC can "
+              "open this server, see your projects, and make file dialogs "
+              "appear on your desktop.")
+    if not args.no_browser:
+        open_url = url + (f"?token={token}" if token else "")
+        threading.Timer(1.0, lambda: webbrowser.open(open_url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 if __name__ == "__main__":

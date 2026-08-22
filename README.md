@@ -22,11 +22,42 @@ run_unflash.bat
 
 A browser page opens at http://127.0.0.1:8765/. Everything runs locally.
 
+### Several people signed in to one PC
+
+Each account gets its own server, because a server's file dialogs and browse
+windows open on the desktop of whoever started it. The first account to start
+Unflash takes port 8765, the next takes 8766, and so on; a server only answers
+requests carrying its own account's token, so nobody else's browser can reach
+your projects — they get a short "this server is not yours" page instead.
+Starting the tool twice from the same account just re-opens the browser on the
+copy already running (`--new` starts a second one anyway).
+
+The token is kept in your own profile folder (`%LOCALAPPDATA%\Unflash`) and
+printed at startup, so if a tab ever shows that page you can paste the printed
+`http://127.0.0.1:<port>/?token=...` address to get back in.
+
+| flag | effect |
+|---|---|
+| `--port N` | use exactly this port instead of picking a free one |
+| `--new` | start another server even if this account already has one |
+| `--no-token` | turn the check off: every account on the PC can then use this server, its projects and its file dialogs |
+| `--no-browser` | don't open a browser |
+| `--video FILE` | open this video on startup |
+
+Note that two accounts opening the *same* video still share the one
+`<name>.unflash` folder beside it, and would overwrite each other's edits.
+
 ## Workflow
 
 1. **Open video** — a work folder `<name>.unflash/` is created next to it;
    all state (sections, edits, proxies, renders) persists there, so you can
-   close and resume anytime.
+   close and resume anytime. Re-opening the same video picks that folder up
+   again, even if the video and its folder have since been moved or renamed.
+   **Open project folder…** loads a `<name>.unflash` folder you point at
+   directly — for when it was moved away from its video, or was not picked up
+   automatically. Either way the paths saved inside it are re-pointed at where
+   the files actually are, and anything genuinely missing is reported so you
+   know what to prepare or render again.
 2. **Scan for flashes** — a WCAG 2.x / PEAT-style detector (general flash,
    red flash, and — unless the profile is *Exact WCAG only* — extended
    flashes) runs over the whole video and produces

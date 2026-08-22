@@ -11,6 +11,7 @@
   <div class="brand">⚡̶ Unflash</div>
   <button id="btnHome" title="Back to the start screen with the workflow guide">🏠 Guide</button>
   <button id="btnOpen" class="primary">Open video…</button>
+  <button id="btnOpenProject" title="Open an existing &lt;name&gt;.unflash project folder — use this when a project was moved, renamed, or is not picked up automatically">Open project folder…</button>
   <div id="videoInfo" class="video-info"></div>
   <div class="spacer"></div>
   <label class="profile-label" title="Notify + beep when an operation takes longer than this many minutes">🔔≥<input type="number" id="notifyMin" min="0" step="1" style="width:3.2em"> min</label>
@@ -25,6 +26,11 @@
   <button id="btnScan" disabled>Scan for flashes</button>
   <button id="btnExport" disabled>Export…</button>
 </header>
+
+<div id="banner" class="banner hidden">
+  <div id="bannerText"></div>
+  <button id="btnCloseBanner" class="small">dismiss</button>
+</div>
 
 <div id="jobbar" class="jobbar hidden">
   <div class="jobname" id="jobName"></div>
@@ -146,6 +152,14 @@
       <li><b>Render full-res</b> — this must be done for <b>every</b> section before exporting (<b>render all</b> in the sidebar does them all, skipping up-to-date ones). Sections whose edits changed after rendering are flagged <i>render stale</i>; re-render them.</li>
       <li><b>Export</b> stitches the rendered sections back into the untouched video, then <b>Verify</b> re-scans the final file.</li>
     </ol>
+    <p class="note-resume"><b>Resuming work.</b> Everything is saved in a
+      <code>&lt;video name&gt;.unflash</code> folder beside the video, and
+      re-opening that video picks it up again — including after the video and
+      its folder have been moved or renamed. If a project isn't picked up
+      automatically (or you moved the folder away from its video), use
+      <b>Open project folder…</b> and point at the <code>.unflash</code> folder
+      itself; the paths stored inside it are repaired, and anything missing is
+      listed at the top of the window.</p>
     <p class="note-extended"><b>Extended flashes</b> are 5&nbsp;s or longer of flashing that meets every WCAG failure criterion except the rate — it runs <i>at</i> the permitted rate (3&nbsp;flashes/s) instead of above it. WCAG does not fail them, but ITC/Ofcom guidance treats them as a hazard, so the default profile flags them as ordinary work sections (labelled <i>extended flash</i>) that you can edit, check and render like any other. Pick <i>Exact WCAG only</i> if you want them ignored completely. <i>Stricter than WCAG</i> does not flag them either — it already fails outright at the rate the extended test looks for.</p>
     <p class="disclaimer">This tool reduces risk; it cannot guarantee safety. It does not detect hazardous static patterns (e.g.&nbsp;fine stripes), and individual sensitivity varies — review flagged sections yourself before sharing.</p>
   </section>
