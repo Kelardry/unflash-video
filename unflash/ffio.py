@@ -23,6 +23,9 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 _PTS_RE = re.compile(r"pts_time:\s*(-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)")
 
+# a video timestamp step this large is a hole, not just an uneven frame
+HOLE_SECONDS = 0.25
+
 
 class FFError(RuntimeError):
     pass
@@ -126,13 +129,16 @@ def index_video(path, progress=None):
     if not all_pts:
         return {"keyframes": [], "ts_min": 0.0, "ts_max": 0.0,
                 "median_delta": 1.0 / 30, "n_packets": 0,
-                "discontinuities": 0}
+                "discontinuities": 0, "holes": 0}
     all_pts.sort()
     arr = np.asarray(all_pts)
     deltas = np.diff(arr)
     deltas = deltas[deltas > 1e-9]
     med = float(np.median(deltas)) if len(deltas) else 1.0 / 30
     disc = int(np.count_nonzero(deltas > 5.0)) if len(deltas) else 0
+    # anything an eye would read as a freeze rather than a stutter; used to
+    # tell an export's own gaps apart from ones its parts already had
+    holes = int(np.count_nonzero(deltas > HOLE_SECONDS)) if len(deltas) else 0
     return {
         "keyframes": keyframes,
         "ts_min": float(arr[0]),
@@ -140,6 +146,7 @@ def index_video(path, progress=None):
         "median_delta": med,
         "n_packets": len(all_pts),
         "discontinuities": disc,
+        "holes": holes,
     }
 
 
@@ -231,29 +238,41 @@ def video_timescale(path):
         return 0
 
 
-def span_video_pts(path, start, end):
-    """Video packet timestamps inside [start, end), without decoding.
+def stream_duration(path, kind="v"):
+    """Exact duration in seconds of the file's first video (or audio) stream.
 
-    Used to work out what a span's timeline will look like before encoding
-    it. ffprobe seeks to the keyframe at or before `start`, so the extra
-    leading packets are filtered out here.
+    Read as duration_ts * time_base -- the muxer's own number -- rather than
+    the rounded decimal ffprobe prints, because parts are joined by adding up
+    these durations and a millisecond of slop per part becomes a visible hole
+    in the export.
     """
-    cmd = [FFPROBE, "-v", "error", "-select_streams", "v:0", "-read_intervals",
-           (f"{start:.6f}%{end:.6f}" if start > 0 else f"%{end:.6f}"),
-           "-show_entries", "packet=pts_time", "-of", "csv=p=0", path]
-    r = _run(cmd)
+    r = _run([FFPROBE, "-v", "error", "-select_streams", f"{kind}:0",
+              "-show_entries", "stream=duration_ts,time_base,duration",
+              "-print_format", "json", path])
     if r.returncode != 0:
-        return []
-    out = []
-    for line in r.stdout.splitlines():
+        return 0.0
+    try:
+        st = (json.loads(r.stdout).get("streams") or [])[0]
+    except (ValueError, IndexError, AttributeError):
+        return 0.0
+    ts, tb = st.get("duration_ts"), str(st.get("time_base") or "")
+    if ts and "/" in tb:
         try:
-            t = float(line.strip().rstrip(","))
-        except ValueError:
-            continue
-        if start - 1e-6 <= t < end - 1e-6:
-            out.append(t)
-    out.sort()
-    return out
+            num, den = tb.split("/")
+            return float(ts) * float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            pass
+    try:
+        return float(st.get("duration"))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# NB: there is deliberately no "what will this span's timeline look like"
+# helper here. `-read_intervals` does not return the frame set ffmpeg decodes
+# from the same seek (it stops on decode order, and the count drifts), so a
+# span's length can only be found by encoding it and measuring — see
+# render._encode_gap.
 
 
 def iter_frames(path, out_w, out_h, start=None, duration=None,
