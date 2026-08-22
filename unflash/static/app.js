@@ -182,14 +182,40 @@ async function refreshProject(openSid = null) {
 }
 
 // notes from opening a project (relinked paths, missing files, …)
-function showNotes(notes) {
+const esc = (s) => String(s).replace(/[&<>]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+function showNotes(notes, recoverable) {
   const el = $("banner");
-  if (!notes || !notes.length) { el.classList.add("hidden"); return; }
-  $("bannerText").innerHTML = notes.map((n) =>
-    `<div>⚠ ${n.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}</div>`).join("");
-  el.classList.remove("hidden");
+  const lines = (notes || []).map((n) => `<div>⚠ ${esc(n)}</div>`);
+  const n = (recoverable || []).length;
+  if (n) {
+    lines.push(`<div>⚠ This folder holds ${plural(n, "section folder", "section folders")} `
+      + `(#${recoverable.map(esc).join(", #")}) that the project file does not list — `
+      + `renders and proxies that are not part of the project. They can be rebuilt from `
+      + `what is on disk; frame marks cannot be brought back.</div>`);
+  }
+  $("bannerText").innerHTML = lines.join("");
+  $("btnRecover").classList.toggle("hidden", !n);
+  el.classList.toggle("hidden", !lines.length);
 }
 $("btnCloseBanner").onclick = () => $("banner").classList.add("hidden");
+
+$("btnRecover").onclick = async () => {
+  if (!confirm("Rebuild the unlisted section folders as sections?\n\n"
+    + "Time ranges are taken from the last export's part list (or the last scan). "
+    + "Existing full-res renders are kept and can be exported as they are, but the "
+    + "frame marks that produced them are gone.")) return;
+  try {
+    const r = await api("/api/recover_sections", "POST", {});
+    await refreshProject();
+    showNotes(r.notes, r.recoverable);
+    toast(r.recovered.length
+      ? `Recovered ${plural(r.recovered.length, "section", "sections")}.`
+      : "Nothing could be recovered — see the message at the top.",
+      !r.recovered.length);
+  } catch (e) { toast(e.message, true); }
+};
 
 async function pickVideoPath() {
   const r = await api("/api/pick", "POST", {});
@@ -204,7 +230,7 @@ async function afterOpen(res, msg) {
   $("workspace").classList.add("hidden");
   $("welcome").classList.remove("hidden");
   await refreshProject();
-  showNotes(res.notes);
+  showNotes(res.notes, res.recoverable);
   toast(msg);
 }
 
@@ -432,7 +458,9 @@ function renderSectionList() {
     if (s.check_safe === false) badges.push('<span class="badge bad">check ✗</span>');
     if (s.render_stale) badges.push('<span class="badge warn">render stale ⚠</span>');
     else if (s.render_safe === true) badges.push('<span class="badge ok">rendered ✓</span>');
-    else if (s.has_render) badges.push('<span class="badge bad">rendered ✗</span>');
+    else if (s.render_safe === false) badges.push('<span class="badge bad">rendered ✗</span>');
+    // a recovered render carries no verdict: rendered, but never checked
+    else if (s.has_render) badges.push('<span class="badge neutral">rendered, unchecked</span>');
     if ((s.warnings || []).length) badges.push('<span class="badge warn">⚠ notes</span>');
     el.innerHTML = `<div class="times">#${s.id} · ${fmtTime(s.start)} – ${fmtTime(s.end)}</div>
       <div class="meta">${badges.join("")}</div>`;
@@ -981,7 +1009,8 @@ $("btnExport").onclick = () => {
     if (!s.has_render) st = "❌ NOT RENDERED — use 'Render full-res' first";
     else if (s.render_stale) st = "⚠ rendered, but edits changed since (re-render)";
     else if (s.render_safe === true) st = "✓ rendered & safe";
-    else st = "⚠ rendered but NOT safe";
+    else if (s.render_safe === false) st = "⚠ rendered but NOT safe";
+    else st = "• rendered, never checked by the detector (recovered)";
     return `#${s.id} · ${fmtTime(s.start)}–${fmtTime(s.end)}: ${st}`;
   });
   $("exportSummary").innerHTML =

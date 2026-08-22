@@ -211,7 +211,8 @@ def _activate(project, label):
             return _err(f"'{label}' has no duration and packet indexing "
                         f"failed: {e}", 400)
     state["project"] = project
-    return jsonify({"project": _project_payload(), "notes": project.notes})
+    return jsonify({"project": _project_payload(), "notes": project.notes,
+                    "recoverable": project.orphan_sections()})
 
 
 @app.post("/api/open")
@@ -259,6 +260,17 @@ def open_project():
     except Exception as e:  # noqa: BLE001 - reported to the UI
         return _err(f"Could not open project '{name}': {e}", 400)
     return _activate(project, os.path.basename(video))
+
+
+@app.post("/api/recover_sections")
+def recover_sections():
+    """Rebuild section entries from folders left in the work directory when
+    the project file lost them."""
+    p = proj()
+    recovered, notes = p.recover_sections()
+    return jsonify({"recovered": recovered, "notes": notes,
+                    "project": _project_payload(),
+                    "recoverable": p.orphan_sections()})
 
 
 @app.get("/api/project")

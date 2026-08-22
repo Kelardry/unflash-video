@@ -1,10 +1,10 @@
 # Unflash
 
 Detect and repair photosensitive-hazard flashing in videos, while keeping the
-visual information that naive "flash removal" filters destroy. Removed frames
-are replaced by the last kept frame (timing is untouched), and important
-flash frames can be *extended* — held for 1 second with silent audio — so
-nothing informational is lost.
+visual information that naive "flash removal" filters destroy.
+Removed frames are replaced by the last kept frame, with timing untouched),
+Important flash frames can be extended to last for 1 second with silent audio,
+to keep any important information.
 
 ## Setup
 
@@ -58,6 +58,18 @@ Note that two accounts opening the *same* video still share the one
    automatically. Either way the paths saved inside it are re-pointed at where
    the files actually are, and anything genuinely missing is reported so you
    know what to prepare or render again.
+
+   If the folder holds `section_*` folders that `project.json` does not list,
+   a **recover sections** button appears. It rebuilds those sections, taking
+   their time ranges from the part list of the last export (or, failing that,
+   the last scan) and keeping the full-res renders, so a project whose
+   `project.json` was lost can still be exported. Frame marks live only in
+   `project.json` and cannot be recovered, so a recovered section is marked
+   *unprepared*: re-rendering it would produce an unedited version. Verify the
+   export when you are done.
+
+   A project file that cannot be read is never overwritten — it is copied to
+   `project.unreadable-<timestamp>.json` before a fresh project is started.
 2. **Scan for flashes** — a WCAG 2.x / PEAT-style detector (general flash,
    red flash, and — unless the profile is *Exact WCAG only* — extended
    flashes) runs over the whole video and produces

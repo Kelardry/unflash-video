@@ -4,6 +4,8 @@ directory next to the video (``<name>.unflash/``)."""
 import hashlib
 import json
 import os
+import re
+import shutil
 import threading
 import time
 
@@ -124,6 +126,57 @@ def project_dir_video(workdir):
     return None, stored
 
 
+def orphan_section_dirs(workdir, sections):
+    """Section folders sitting in the work folder that the project data does
+    not know about — what is left when a project file is lost or replaced."""
+    out = []
+    try:
+        entries = os.listdir(workdir)
+    except OSError:
+        return out
+    for name in entries:
+        m = re.match(r"^section_(.+)$", name)
+        d = os.path.join(workdir, name)
+        if not m or not os.path.isdir(d):
+            continue
+        sid = m.group(1)
+        if sid in (sections or {}):
+            continue
+        # only folders that still hold real work are worth offering back
+        if any(os.path.exists(os.path.join(d, f))
+               for f in ("render.mp4", "proxy.mp4", "analysis_frames.npy")):
+            out.append(sid)
+    return sorted(out, key=lambda x: (0, int(x)) if x.isdigit() else (1, 0))
+
+
+def _concat_items(workdir):
+    """The part list of the last export, as ('gap', start, end) and
+    ('sec', id) items in order. The untouched spans are named with their
+    exact source times, which is what makes recovery possible."""
+    path = os.path.join(workdir, "export_parts", "concat.txt")
+    items = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return items
+    for line in lines:
+        line = line.strip()
+        if not (line.startswith("file '") and line.endswith("'")):
+            continue
+        name = os.path.basename(line[6:-1].replace("\\", "/"))
+        m = re.match(r"^gap_([0-9.]+)_([0-9.]+)_", name)
+        if m:
+            items.append(("gap", float(m.group(1)), float(m.group(2))))
+            continue
+        m = re.match(r"^section_(.+)$",
+                     os.path.basename(os.path.dirname(
+                         line[6:-1].replace("\\", "/"))))
+        if m:
+            items.append(("sec", m.group(1)))
+    return items
+
+
 class Project:
     def __init__(self, video_path, workdir=None, adopt=False):
         """``workdir`` overrides the ``<name>.unflash`` folder beside the
@@ -134,6 +187,8 @@ class Project:
         self.workdir = (os.path.abspath(workdir) if workdir
                         else workdir_for(video_path))
         self.notes = []        # user-facing messages about the load/repair
+        self._loaded = False   # did we adopt an existing project file?
+        self._backed_up = False
         self.lock = threading.RLock()
         self.data = {
             "video_path": self.video_path,
@@ -170,9 +225,10 @@ class Project:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 stored = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            self.notes.append(f"The project file in {self.workdir} could not "
-                              f"be read ({e}); starting a fresh project.")
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            # left unloaded on purpose: save() keeps a copy of the old file
+            # before writing anything over it
+            self.notes.append(f"The project file could not be read ({e}).")
             return
         if not isinstance(stored, dict):
             return
@@ -190,6 +246,7 @@ class Project:
                 f"exists; it has been relinked to the video you opened.")
 
         self.data.update(stored)
+        self._loaded = True
         self.data["video_path"] = self.video_path
         self.data["workdir"] = self.workdir
         self._migrate_settings()
@@ -322,10 +379,35 @@ class Project:
 
     def save(self):
         with self.lock:
+            self._protect_unloaded()
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f)
             os.replace(tmp, self.path)
+
+    def _protect_unloaded(self):
+        """Never write over a project file we could not read.
+
+        Everything about a project -- section ranges, frame marks, which
+        renders are current -- lives in that one file, and the work folder
+        beside it can hold hours of rendering. Saving a fresh default project
+        on top of it destroys all of that, so keep a copy of anything we did
+        not manage to load before the first write."""
+        if self._loaded or self._backed_up:
+            return
+        self._backed_up = True
+        if not os.path.exists(self.path):
+            return
+        bak = os.path.join(
+            self.workdir,
+            f"project.unreadable-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        try:
+            shutil.copy2(self.path, bak)
+            self.notes.append(
+                f"A fresh project was started; the old project file was kept "
+                f"as {os.path.basename(bak)} in case it can be salvaged.")
+        except OSError:
+            pass
 
     # --- config --------------------------------------------------------------
     @property
@@ -401,6 +483,147 @@ class Project:
             }
             self.save()
             return self.data["sections"][sid]
+
+    # --- recovery -------------------------------------------------------------
+    def orphan_sections(self):
+        return orphan_section_dirs(self.workdir, self.data.get("sections"))
+
+    def _recovered_ranges(self, sids):
+        """Time ranges for section folders whose entries were lost.
+
+        The last export's part list is the reliable source: it names every
+        untouched span with its exact source times, so each section is what
+        sits between the span before it and the span after it. Failing that,
+        the last scan's suggested ranges are used if there is one per folder.
+        Returns ``(ranges, description)``."""
+        lo, hi = self.bounds
+        items = _concat_items(self.workdir)
+        ranges = {}
+        if items:
+            cursor = lo
+            for i, it in enumerate(items):
+                if it[0] == "gap":
+                    cursor = it[2]
+                    continue
+                sid = it[1]
+                start = cursor
+                nxt = items[i + 1] if i + 1 < len(items) else None
+                if nxt and nxt[0] == "gap":
+                    end = nxt[1]
+                else:
+                    # two sections in a row, or the last part: the unedited
+                    # proxy is exactly as long as the section
+                    end = start + self._proxy_duration(sid, hi - start)
+                if end > start:
+                    ranges[sid] = (start, end)
+                cursor = end
+            if ranges:
+                return ranges, "the part list of the last export"
+
+        sug = ((self.data.get("scan") or {}).get("suggested_sections")) or []
+        if len(sug) == len(sids):
+            for sid, sec in zip(sids, sug):
+                ranges[sid] = (sec["start"], sec["end"])
+            return ranges, "the ranges found by the last scan"
+        return {}, ""
+
+    def _proxy_duration(self, sid, fallback):
+        proxy = os.path.join(self.workdir, f"section_{sid}", "proxy.mp4")
+        if os.path.exists(proxy):
+            try:
+                d = (ffio.probe(proxy) or {}).get("duration")
+                if d and d > 0:
+                    return float(d)
+            except Exception:  # noqa: BLE001 - fall back to the caller's guess
+                pass
+        return fallback
+
+    def recover_sections(self):
+        """Rebuild entries for section folders the project file has lost.
+
+        The rendered and preview files are re-attached as they are, so an
+        export can still use them; everything derived from a per-frame
+        analysis (the frame marks above all) lived only in the project file
+        and cannot come back, so the sections are marked unprepared."""
+        sids = self.orphan_sections()
+        if not sids:
+            return [], ["No unlisted section folders were found in "
+                        f"{self.workdir}."]
+        ranges, source = self._recovered_ranges(sids)
+        if not ranges:
+            return [], [
+                "Found " + ", ".join("#" + s for s in sids) + " on disk, but "
+                "there is nothing left to say which part of the video they "
+                "cover (that needs the part list of a previous export, or a "
+                "scan). Re-scan the video to make fresh sections."]
+
+        recovered, skipped, notes = [], [], []
+        with self.lock:
+            for sid in sids:
+                if sid not in ranges:
+                    skipped.append(sid)
+                    continue
+                start, end = ranges[sid]
+                sdir = os.path.join(self.workdir, f"section_{sid}")
+                sec = {
+                    "id": sid,
+                    "start": round(float(start), 6),
+                    "end": round(float(end), 6),
+                    "kinds": ["recovered"],
+                    "created": time.time(),
+                    "prepared": False,
+                    "n_frames": 0,
+                    "pts": [],
+                    "proxy": None,
+                    "thumbs": None,
+                    "cache_npy": None,
+                    "edits": {},
+                    "analysis": None,
+                    "check": None,
+                    "preview": None,
+                    "render": None,
+                    "warnings": [],
+                }
+                for key, fname in (("preview", "preview.mp4"),
+                                   ("render", "render.mp4")):
+                    f = os.path.join(sdir, fname)
+                    if os.path.exists(f):
+                        # edits_sig "" matches the empty edit set, so the
+                        # render counts as current and export can use it
+                        sec[key] = {"path": f, "verdict": None,
+                                    "warning": None, "grid_fps": None,
+                                    "source": ("original" if key == "render"
+                                               else "preview"),
+                                    "edits_sig": ""}
+                if sec["render"]:
+                    sec["warnings"].append(
+                        "Recovered from the files left in this folder. The "
+                        "full-res render was kept and can be exported as it "
+                        "is, but the frame marks that produced it are gone — "
+                        "rendering this section again would undo them.")
+                else:
+                    sec["warnings"].append(
+                        "Recovered from the files left in this folder; it had "
+                        "no full-res render, so prepare and edit it again "
+                        "before exporting.")
+                self.data["sections"][sid] = sec
+                recovered.append(sid)
+            nums = [int(s) for s in self.data["sections"] if s.isdigit()]
+            self.data["next_section_id"] = max(nums or [0]) + 1
+            self.save()
+
+        notes.append(
+            f"Recovered {len(recovered)} section(s) from the files in this "
+            f"folder; their time ranges come from {source}. The frame marks "
+            f"are gone for good, but the full-res renders were kept and the "
+            f"export will use them as they are — run \"Verify exported file\" "
+            f"afterwards to confirm the result. Prepare a section again only "
+            f"if you want to edit it, and re-render it if you do.")
+        if skipped:
+            notes.append("Could not place " + ", ".join("#" + s for s in
+                                                        skipped)
+                         + " on the timeline; those folders were left alone.")
+        return recovered, notes
 
     def section(self, sid):
         sec = self.data["sections"].get(str(sid))
