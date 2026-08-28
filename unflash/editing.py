@@ -16,6 +16,140 @@ from . import ffio
 from .analysis import FlashDetector, _LUT, analyze_frames
 from .config import detector_signature, profile_name
 
+# How many frames are compared when checking that a fresh decode of a section
+# still hands back the pictures its marks were made against, and how far out
+# of step a decode is still recognised.
+ALIGN_PROBE = 64
+ALIGN_CAP = 900
+ALIGN_MAX_SHIFT = 8
+# Both sides of the comparison are decoded at analysis resolution, so the
+# right alignment fits almost exactly (a fifth of a level, measured) while the
+# next best sits a level or more away even on a near-still section. A fit
+# worse than ALIGN_FIT means the two decodes are not of the same material at
+# all and nothing should be concluded from them.
+ALIGN_FIT = 1.0
+ALIGN_TOL = 0.5
+
+
+ALIGN_GRID = 8
+
+
+def frame_signatures(frames, grid=ALIGN_GRID):
+    """One fingerprint per frame: the mean RGB of each cell of a `grid`-square
+    covering the picture, flattened.
+
+    The cells are proportional, and area scaling averages the pixels it
+    merges, so a frame signs the same at analysis resolution as at full size.
+    That is what lets a render check the pictures it just decoded against the
+    ones the editor showed without decoding the section a second time. Cells
+    rather than one whole-frame mean because a shot can move a great deal
+    without its average changing, and an alignment that cannot be read is as
+    good as no check at all.
+    """
+    n = len(frames)
+    out = np.empty((n, grid * grid * 3), np.float32)
+    for i in range(0, n, 128):      # chunked: `frames` is usually a memmap
+        blk = np.asarray(frames[i:i + 128], dtype=np.float32)
+        m = blk.shape[0]
+        ys = np.linspace(0, blk.shape[1], grid + 1).astype(int)
+        xs = np.linspace(0, blk.shape[2], grid + 1).astype(int)
+        cells = np.empty((m, grid, grid, 3), np.float32)
+        for r in range(grid):
+            for c in range(grid):
+                cells[:, r, c] = blk[:, ys[r]:ys[r + 1],
+                                     xs[c]:xs[c + 1]].mean(axis=(1, 2))
+        out[i:i + m] = cells.reshape(m, -1)
+    return out
+
+
+def best_shift(fresh, cached, max_shift=ALIGN_MAX_SHIFT):
+    """The s for which fresh[i] is the same picture as cached[i + s].
+
+    Returns (shift, decisive). Alignment can only be read off a span that
+    changes: over a still scene every offset fits as well as every other, and
+    `decisive` is False to say the span has not answered the question. That
+    is the whole reason a probe has to keep reading until it reaches motion --
+    the opening seconds of a section are often a held shot, and they would
+    happily report "in step" whatever the truth is.
+    """
+    scores = {}
+    for s in range(-max_shift, max_shift + 1):
+        i0 = max(0, -s)
+        i1 = min(len(fresh), len(cached) - s)
+        if i1 - i0 < 4:
+            continue
+        scores[s] = float(np.abs(fresh[i0:i1] - cached[i0 + s:i1 + s]).mean())
+    if 0 not in scores or len(scores) < 2:
+        return 0, False
+    order = sorted(scores, key=scores.get)
+    best, runner = order[0], order[1]
+    if scores[best] > ALIGN_FIT:
+        return 0, False          # not the same material; conclude nothing
+    if scores[runner] <= 2 * scores[best] + ALIGN_TOL:
+        return 0, False          # nothing here tells the two apart
+    return best, True
+
+
+def _cached_means(path, count, shape):
+    """First `count` fingerprints of a cached analysis file, or None if it
+    does not describe frames of `shape`. The mapping is closed before
+    returning: on Windows a live memmap would block rewriting the file."""
+    arr = np.load(path, mmap_mode="r")
+    try:
+        if arr.ndim != 4 or arr.shape[1:] != shape:
+            return None
+        return frame_signatures(arr[:min(count, arr.shape[0])])
+    finally:
+        mm = getattr(arr, "_mmap", None)
+        if mm is not None:
+            mm.close()
+
+
+def cache_shift(project, sid, probe=ALIGN_PROBE, cap=ALIGN_CAP):
+    """How far a fresh decode of a section has slipped against its cached
+    analysis frames, in frames (0 = in step).
+
+    A frame mark is an ordinal, and an ordinal only names a picture for as
+    long as every decode of `-ss start -t duration` returns the same frames.
+    That is not a promise ffmpeg makes: where `start` falls between two frames
+    -- which is every section not cut exactly on a frame boundary -- whether
+    the earlier frame survives the seek is its decision, and it has changed
+    under prepared projects here. When it moves, the marks keep their numbers
+    but the numbers now name the neighbouring picture, so a render holds the
+    frames that were removed and drops the ones that were kept, and nothing
+    downstream can tell: the frame count is identical either way. Measuring
+    the slip costs one short decode.
+    """
+    sec = project.section(sid)
+    cached = load_cache(project, sid)
+    n = min(cap, cached.shape[0])
+    if n < 8:
+        return 0
+    info = project.data["info"]
+    aw, ah = ffio.analysis_dims(info["width"], info["height"],
+                                project.detector_config)
+    if cached.shape[1:] != (ah, aw, 3):
+        return 0            # analysis scale changed; the cache is stale anyway
+    ref = frame_signatures(cached[:n])
+    fresh = []
+    shift = 0
+    for _, fr in ffio.iter_frames(project.video_path, aw, ah,
+                                  start=sec["start"],
+                                  duration=sec["end"] - sec["start"]):
+        fresh.append(frame_signatures(fr[None, ...])[0])
+        if len(fresh) >= n:
+            break
+        # stop as soon as the span read so far settles the question, which on
+        # a section worth editing is within a second or two of its first
+        # movement; a section that never settles it has nothing to correct
+        if len(fresh) >= probe and len(fresh) % probe == 0:
+            shift, decisive = best_shift(np.asarray(fresh), ref)
+            if decisive:
+                return shift
+    if len(fresh) < 8:
+        return 0
+    return best_shift(np.asarray(fresh), ref)[0]
+
 
 def prepare_section(project, sid, job=None):
     """Analyze the section, cache analysis frames, build proxy + thumbnails."""
@@ -59,6 +193,18 @@ def prepare_section(project, sid, job=None):
     rel_pts = [round(t, 6) for t in rel_pts]
 
     cache_npy = os.path.join(sdir, "analysis_frames.npy")
+    # Re-preparing keeps the frame marks, so this decode has to land on the
+    # same pictures the previous one did. If ffmpeg placed the seek elsewhere
+    # this time, the marks would silently move to their neighbours; compare
+    # the two decodes and carry the marks across by the measured amount.
+    shift = 0
+    if sec.get("prepared") and sec.get("edits") and os.path.exists(cache_npy):
+        try:
+            was_means = _cached_means(cache_npy, ALIGN_CAP, (ah, aw, 3))
+        except (ValueError, OSError):
+            was_means = None
+        if was_means is not None:
+            shift, _ = best_shift(frame_signatures(frames[:ALIGN_CAP]), was_means)
     np.save(cache_npy, np.stack(frames))
     del frames
 
@@ -91,9 +237,19 @@ def prepare_section(project, sid, job=None):
             f"Re-prepared with {len(rel_pts)} frames where the marks were "
             f"made against {was}; your marks were kept but now sit on "
             "different frames — check them before rendering.")
+    edits = sec.get("edits") or {}
+    if shift:
+        edits = {str(int(k) - shift): v for k, v in edits.items()
+                 if 0 <= int(k) - shift < len(rel_pts)}
+        warnings.append(
+            f"This decode of the section begins {shift:+d} frame(s) from the "
+            "one your marks were made against (ffmpeg placed the seek "
+            "differently), so every mark was moved by that much to stay on "
+            "the picture you chose. Look over the section before rendering.")
 
     with project.lock:
         sec["prepared"] = True
+        sec["edits"] = edits
         sec["n_frames"] = len(rel_pts)
         sec["pts"] = rel_pts
         sec["proxy"] = proxy

@@ -9,6 +9,7 @@ other's desktops.
 """
 
 import argparse
+import hashlib
 import os
 import secrets
 import subprocess
@@ -301,6 +302,27 @@ def _project_payload():
     return d
 
 
+def thumb_key(p, s):
+    """A token that changes whenever a section's thumbnails do.
+
+    /thumb/<sid>/<n> names a section id and an ordinal, and section ids start
+    again at 1 in every project, so that address means a different picture in
+    every video opened on this machine. Browsers do not know that; they cache
+    by address. The key goes on the query string so each set of thumbnails
+    gets its own cacheable address instead of inheriting the last video's.
+    """
+    stamp = 0
+    # the cache file is rewritten by every prepare; the thumbnails are
+    # overwritten in place, which need not move the folder's own timestamp
+    for f in (s.get("cache_npy"), s.get("thumbs")):
+        try:
+            stamp = max(stamp, os.path.getmtime(f)) if f else stamp
+        except OSError:
+            pass
+    raw = f"{p.workdir}|{s.get('id')}|{stamp}|{s.get('n_frames')}"
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
 def _section_summary(s):
     out = {k: s.get(k) for k in
            ("id", "start", "end", "kinds", "prepared", "n_frames",
@@ -474,6 +496,7 @@ def section_detail(sid):
     p = proj()
     s = p.section(sid)
     out = dict(s)
+    out["thumb_key"] = thumb_key(p, s)
     # per-frame chart data comes from the stored analysis stats
     return jsonify({"section": out})
 
@@ -639,13 +662,21 @@ def render_full(sid):
 
 @app.get("/thumb/<sid>/<int:n>")
 def thumb(sid, n):
-    s = proj().section(sid)
+    p = proj()
+    s = p.section(sid)
     if not s.get("thumbs"):
         abort(404)
     f = os.path.join(s["thumbs"], f"{n:06d}.jpg")
     if not os.path.exists(f):
         abort(404)
-    return send_file(f, mimetype="image/jpeg", max_age=3600)
+    # only an address carrying the current key may be cached: without one it
+    # cannot be told apart from the same address in another project
+    fresh = request.args.get("v") == thumb_key(p, s)
+    resp = send_file(f, mimetype="image/jpeg",
+                     max_age=(7 * 24 * 3600 if fresh else 0))
+    if not fresh:
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.get("/media/<sid>/<name>")
@@ -659,7 +690,12 @@ def media(sid, name):
     f = mapping.get(name)
     if not f or not os.path.exists(f):
         abort(404)
-    return send_file(f, mimetype="video/mp4", conditional=True)
+    # /media/<sid>/proxy.mp4 means a different video in every project, so a
+    # browser must never reuse one on its own judgement; "no-cache" still
+    # lets it keep the bytes and revalidate, which range requests need
+    resp = send_file(f, mimetype="video/mp4", conditional=True, max_age=0)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 # --- export ------------------------------------------------------------------

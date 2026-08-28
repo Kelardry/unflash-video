@@ -24,6 +24,7 @@ import numpy as np
 
 from . import ffio
 from .analysis import analyze_file
+from .editing import cache_shift
 from .ffio import FFMPEG, FFError, CREATE_NO_WINDOW
 
 # Every part handed to the concat demuxer must share one mp4 timescale. With
@@ -171,9 +172,15 @@ def render_section(project, sid, source, out_path, job=None,
     """Render one section with its edits applied.
 
     source: 'original' (full resolution) or 'preview' (fast, proxy-sized).
-    Both decode from the ORIGINAL video so frame ordinals always match the
-    prepared analysis/thumbnails — re-encoded proxies cannot be trusted to
-    keep frame counts on messy VFR sources.
+    Both decode from the ORIGINAL video, never a re-encoded proxy, so the
+    pictures are the ones the section was prepared from. That still leaves
+    one thing to check before applying anything: a mark names an ordinal, and
+    this decode has to have started on the same frame the prepare pass did
+    (see editing.cache_shift). Where it did not, the ordinals are offset by
+    the measured amount rather than trusted, because the failure is invisible
+    otherwise — the frame count comes out identical either way, and the render
+    simply holds the frames that were removed and drops the ones that were
+    kept.
     """
     sec = project.section(sid)
     rc = project.render_config
@@ -196,6 +203,14 @@ def render_section(project, sid, source, out_path, job=None,
     grid = _pick_grid_fps([float(t) for t in (sec["pts"] or [])])
     rel_pts, n_out, total, base, med_delta = _section_timeline(sec)
     cut_times = _section_cuts(sec, rel_pts, n_out)
+
+    # frame N of this decode is the section's frame N + shift
+    if job:
+        job.set_progress(0.0, "checking frame alignment")
+    try:
+        shift = cache_shift(project, sid)
+    except (RuntimeError, FFError, OSError, ValueError):
+        shift = 0           # nothing cached to compare against
 
     # Video first, on its own; the audio follows in a second pass, trimmed to
     # whatever the video actually came out as rather than to the length the
@@ -248,12 +263,15 @@ def render_section(project, sid, source, out_path, job=None,
                               cancel=(job.cancelled if job else None))
         pending = None  # frame bytes held until we know the next frame's time
         for i, (t, frame) in enumerate(it):
-            if i >= n_out:
+            k = i + shift       # the prepared ordinal this picture holds
+            if k < 0:
+                continue        # decoded ahead of the section's first frame
+            if k >= n_out:
                 continue        # the next part covers it (see n_out above)
             # canonical timeline: sanitized pts recorded at prepare time
-            rel = rel_pts[i] if i < n_expected else last_rel + med_delta
-            e = edits.get(i, {})
-            if e.get("removed") and (last_kept is not None or i < first_kept):
+            rel = rel_pts[k] if k < n_expected else last_rel + med_delta
+            e = edits.get(k, {})
+            if e.get("removed") and (last_kept is not None or k < first_kept):
                 out_frame = last_kept          # may be None while backfilling
             else:
                 out_frame = frame.tobytes()
@@ -267,8 +285,8 @@ def render_section(project, sid, source, out_path, job=None,
                 pending = out_frame
             last_rel = rel
             if job and i % 100 == 0:
-                p = 0.9 * min(1.0, (i + 1) / max(1, n_expected))
-                prog(p, f"rendering frame {i + 1}"
+                p = 0.9 * min(1.0, (k + 1) / max(1, n_expected))
+                prog(p, f"rendering frame {k + 1}"
                      + (f"/{n_expected}" if n_expected else ""))
         # last frame runs to exactly the timeline end (matches the audio)
         if pending is not None:
@@ -309,11 +327,19 @@ def render_section(project, sid, source, out_path, job=None,
             _unlink(vid_path)
 
     n_got = i + 1
-    warn = None
+    notes = []
+    if shift:
+        notes.append(
+            f"This decode began {shift:+d} frame(s) from the one the section "
+            "was prepared with, so the marks were realigned onto the cached "
+            "frames — the picture matches the editor. Re-prepare the section "
+            "to settle it.")
     if n_expected and n_got != n_expected:
-        warn = (f"Decoded {n_got} frames but section was prepared with "
-                f"{n_expected}; edits are applied by ordinal. Re-prepare "
-                "the section if this persists.")
+        notes.append(
+            f"Decoded {n_got} frames but section was prepared with "
+            f"{n_expected}; edits are applied by ordinal. Re-prepare "
+            "the section if this persists.")
+    warn = " ".join(notes) or None
 
     verdict = None
     if analyze_after:

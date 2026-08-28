@@ -934,7 +934,9 @@ function renderGrid() {
     cell.dataset.i = i;
     const img = document.createElement("img");
     img.loading = "lazy";
-    img.src = `/thumb/${s.id}/${i}`;
+    // the key makes this address specific to these thumbnails; without it a
+    // browser reuses the ones it cached for section #<id> of another video
+    img.src = `/thumb/${s.id}/${i}?v=${s.thumb_key || ""}`;
     img.draggable = false;
     cell.appendChild(img);
     const fn = document.createElement("span");
