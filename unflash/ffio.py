@@ -221,6 +221,13 @@ def sanitize_setpts(max_gap, median_delta):
             rf"{median_delta:.6f}/TB\,{d}))")
 
 
+def has_audio(path):
+    """True if the file carries an audio stream."""
+    r = _run([FFPROBE, "-v", "error", "-select_streams", "a",
+              "-show_entries", "stream=index", "-of", "csv=p=0", path])
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
 def video_timescale(path):
     """The file's video stream timescale (the denominator of its time_base),
     or 0 if it can't be read."""

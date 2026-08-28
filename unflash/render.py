@@ -6,6 +6,12 @@ Frames are emitted onto a fine constant-rate grid (>= 2x the source rate, so
 placement error is bounded by half a grid slot, a few ms, and never
 accumulates). Extensions insert `extension_seconds` of held frame + silence,
 shifting everything after them equally in video and audio.
+
+Assembly is picture-first: every part is video-only, so the join can never be
+thrown off by an audio stream that disagrees with its own video, and the whole
+soundtrack is encoded once at the end against the finished picture. Audio cut
+into per-part pieces leaves an encoder boundary at every section edge, which
+is audible; joining the samples before they reach the encoder is not.
 """
 
 import hashlib
@@ -38,7 +44,15 @@ CMD_CHAR_LIMIT = 30000
 
 # Bumped whenever the way a cached export part is built changes, so parts left
 # over from an older build are re-encoded instead of silently reused.
-PART_FORMAT = 3
+PART_FORMAT = 4
+
+# How far the export's audio may drift from its picture before it is pulled
+# back into line. Re-anchoring costs a splice — a few ms of audio dropped or
+# repeated, i.e. a faint click — so it is only worth it against a drift
+# someone could actually notice, and lip-sync error stays unnoticed well past
+# this. Parts rendered by the current version tile the source closely enough
+# never to reach it.
+AUDIO_RESYNC = 0.05
 
 
 def _pick_grid_fps(rel_pts):
@@ -55,42 +69,101 @@ def _pick_grid_fps(rel_pts):
     return grid
 
 
-def _audio_graph(cut_times, total, ext, rate, target):
-    """filter_complex for input [1:a]: original audio with `ext` seconds of
-    silence inserted at each cut time (section-relative).
+def _audio_filter(segments, rate, target, label="1:a"):
+    """filter_complex text: the listed pieces, concatenated, then padded and
+    trimmed to exactly `target` seconds.
 
-    The output duration is forced to exactly `target` — the already-encoded
-    video's measured length: leading gaps are filled with silence (sources
-    sometimes have audio starting later than video), the tail is padded, and
-    the result is trimmed exactly. If audio and video durations differ within
-    a part, the final concat offsets subsequent parts by the longer stream and
-    the video freezes — so exact equality here is load-bearing.
+    `segments` is a list of ("src", a, b) source ranges — times relative to
+    whatever the input was seeked to — and ("sil", seconds) silences. Leading
+    gaps are filled with silence (sources sometimes have audio starting later
+    than video) and the tail is padded, so the result is always exactly
+    `target` long however short the source runs.
     """
     fix = (f"aresample=async=1:first_pts=0,"
            f"aformat=sample_rates={rate}:channel_layouts=stereo")
-    cuts = sorted(max(0.0, min(c, total)) for c in cut_times)
-    tail = f"apad,atrim=0:{target:.6f},asetpts=PTS-STARTPTS[outa]"
-    if not cuts:
-        return f"[1:a]{fix},{tail}"
-    nseg = len(cuts) + 1
-    parts = [f"[1:a]{fix},asplit={nseg}" +
-             "".join(f"[a{i}]" for i in range(nseg)) + ";"]
+    segments = [g for g in segments
+                if (g[2] - g[1] if g[0] == "src" else g[1]) > 1e-6]
+    if not segments:
+        segments = [("src", 0.0, target)]
+    n_src = sum(1 for g in segments if g[0] == "src")
+    # only split the input when something actually reads it: an unconnected
+    # asplit output is a filter-graph error, not a no-op
+    parts = ([f"[{label}]{fix},asplit={n_src}"
+              + "".join(f"[a{i}]" for i in range(n_src)) + ";"]
+             if n_src else [])
     labels = []
-    prev = 0.0
-    for i, c in enumerate(cuts):
-        c = max(prev, c)
-        parts.append(f"[a{i}]apad,atrim={prev:.6f}:{c:.6f},"
-                     f"asetpts=PTS-STARTPTS[s{i}];")
-        labels.append(f"[s{i}]")
-        parts.append(f"anullsrc=r={rate}:cl=stereo,atrim=0:{ext:.3f}[sil{i}];")
-        labels.append(f"[sil{i}]")
-        prev = c
-    i = len(cuts)
-    parts.append(f"[a{i}]atrim=start={prev:.6f},asetpts=PTS-STARTPTS[s{i}];")
-    labels.append(f"[s{i}]")
+    k = 0
+    for i, seg in enumerate(segments):
+        if seg[0] == "src":
+            _, a, b = seg
+            # apad first: a range running past the end of the source still has
+            # to come out its full length, or everything after it shifts
+            parts.append(f"[a{k}]apad,atrim={a:.6f}:{max(a, b):.6f},"
+                         f"asetpts=PTS-STARTPTS[g{i}];")
+            k += 1
+        else:
+            parts.append(f"anullsrc=r={rate}:cl=stereo,"
+                         f"atrim=0:{seg[1]:.6f}[g{i}];")
+        labels.append(f"[g{i}]")
     parts.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[cat];")
-    parts.append(f"[cat]{tail}")
+    parts.append(f"[cat]apad,atrim=0:{target:.6f},asetpts=PTS-STARTPTS[outa]")
     return "".join(parts)
+
+
+def _section_timeline(sec):
+    """How a section maps onto the source: (rel_pts, n_out, total, base, med).
+
+    `rel_pts` are the prepared frame times rebased onto the section's first
+    frame, which is what the render emits; `base` is how far that frame falls
+    after the section's nominal start; `n_out` is how many of them the section
+    actually shows (see render_section); `total` is its exact length.
+
+    The renderer and the exporter both go through here so they cannot disagree
+    about where a section begins and ends in the source -- the exporter needs
+    that to place the export's audio.
+    """
+    rel = [float(t) for t in (sec["pts"] or [])]
+    dur = sec["end"] - sec["start"]
+    if not rel:
+        return [], 0, dur, 0.0, 1.0 / 30
+    deltas = np.diff(rel)
+    ok = len(deltas) and (deltas > 1e-9).any()
+    med = float(np.median(deltas[deltas > 1e-9])) if ok else 1.0 / 30
+    # Frames at or past the section's end belong to the untouched span that
+    # follows it: `-t` is enforced on decode timestamps, so the decode runs a
+    # frame or so past the end, and the next span -- seeking to that same end
+    # -- opens with that very frame. Showing it in both plays it twice and
+    # starts everything after the section late.
+    n_out = sum(1 for t in rel if t < dur - 1e-9) or len(rel)
+    base = rel[0]
+    out = [t - base for t in rel]
+    total = out[n_out] if n_out < len(out) else out[-1] + med
+    return out, n_out, total, base, med
+
+
+def _section_cuts(sec, rel_pts, n_out):
+    """Section-relative times at which an extension holds a frame."""
+    return [rel_pts[i] for i, e in
+            sorted(((int(k), v) for k, v in (sec.get("edits") or {}).items()))
+            if e.get("extended") and not e.get("removed") and i < n_out]
+
+
+def _span_segments(start, length, cuts, ext):
+    """Audio segments covering one part: `length` seconds of output beginning
+    at source time `start`, with `ext` of silence inserted at each cut.
+
+    The source is consumed for length - len(cuts)*ext, since the silences make
+    up the rest -- the same arithmetic the video does when it holds a frame.
+    """
+    segs = []
+    prev = start
+    for c in sorted(cuts):
+        c = max(prev, min(start + length, start + c))
+        segs.append(("src", prev, c))
+        segs.append(("sil", ext))
+        prev = c
+    segs.append(("src", prev, start + length - ext * len(cuts)))
+    return segs
 
 
 def render_section(project, sid, source, out_path, job=None,
@@ -120,41 +193,15 @@ def render_section(project, sid, source, out_path, job=None,
 
     # the section's canonical (sanitized) timeline drives output timing —
     # identical to what the safety simulation used
-    rel_pts = [float(t) for t in (sec["pts"] or [])]
-    grid = _pick_grid_fps(rel_pts)
-    total = (sec["end"] - sec["start"])
-    n_out = len(rel_pts)
-    # how far the section's first frame falls after the seek point
-    base = rel_pts[0] if rel_pts else 0.0
-    if rel_pts:
-        deltas = np.diff(rel_pts)
-        med_delta = float(np.median(deltas[deltas > 1e-9])) \
-            if len(deltas) and (deltas > 1e-9).any() else 1.0 / 30
-        # Frames at or past the section's end belong to the untouched span
-        # that follows it: `-t` is enforced on decode timestamps, so the
-        # decode runs a frame or so past the end, and the next span — seeking
-        # to that same end — opens with that very frame. Emitting it here as
-        # well plays it twice and starts everything after the section late.
-        n_out = sum(1 for t in rel_pts if t < dur - 1e-9) or len(rel_pts)
-        # The stored pts are offsets from the seek point, and the first frame
-        # lands a fraction of a frame after it, so the timeline is rebased
-        # onto that frame. Left as-is the section opens by holding its first
-        # frame for that fraction — again time the previous span has covered.
-        rel_pts = [t - base for t in rel_pts]
-        # both streams end exactly where the next part picks up
-        total = (rel_pts[n_out] if n_out < len(rel_pts)
-                 else rel_pts[-1] + med_delta)
-    else:
-        med_delta = 1.0 / 30
+    grid = _pick_grid_fps([float(t) for t in (sec["pts"] or [])])
+    rel_pts, n_out, total, base, med_delta = _section_timeline(sec)
+    cut_times = _section_cuts(sec, rel_pts, n_out)
 
-    # audio cut points: where extensions insert silence
-    cut_times = [rel_pts[i] for i, e in sorted(edits.items())
-                 if e.get("extended") and not e.get("removed")
-                 and i < n_out]
-
-    # video first, on its own; the audio is added in a second pass trimmed to
-    # whatever the video actually came out as (see _encode_gap) rather than to
-    # the length the grid arithmetic says it should be
+    # Video first, on its own; the audio follows in a second pass, trimmed to
+    # whatever the video actually came out as rather than to the length the
+    # grid arithmetic says it should be. This audio is for the UI to play --
+    # the export lays down its own (see _mux_audio) -- but the two streams
+    # still have to agree, or the player drifts against the edit list.
     vid_path = (out_path + ".v.mp4") if has_audio else out_path
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
@@ -248,7 +295,8 @@ def render_section(project, sid, source, out_path, job=None,
                  # boundary would run it `base` ahead of the picture
                  "-ss", f"{seek + base:.6f}", "-t", f"{dur:.6f}", "-i", src,
                  "-filter_complex",
-                 _audio_graph(cut_times, total, ext, rc.audio_rate, vdur),
+                 _audio_filter(_span_segments(0.0, total, cut_times, ext),
+                               rc.audio_rate, vdur),
                  "-map", "0:v:0", "-map", "[outa]",
                  "-c:v", "copy",
                  "-c:a", "aac", "-b:a", rc.audio_bitrate,
@@ -311,64 +359,51 @@ def _concat_escape(path):
     return path.replace("\\", "/").replace("'", "'\\''")
 
 
-def _normalized_part(path, parts_dir, tag, rc, has_audio):
-    """A copy of `path` that matches every other part: video on the shared
-    MUX_TIMESCALE, audio at the project's sample rate.
+def _video_part(path, parts_dir, tag):
+    """A video-only copy of `path` on the shared MUX_TIMESCALE.
 
-    Parts rendered before those were pinned (or under different settings) would
-    otherwise mismatch, and the concat demuxer mis-stamps whatever disagrees
-    with the first file. Video is always a stream copy, so sections never need
-    re-rendering; only a stale audio rate costs a (cheap) re-encode.
+    Every file handed to the concat demuxer has to agree about stream layout
+    and timebase. Section renders carry their own audio because the UI plays
+    them, but the export does not use it -- its audio is laid down in one
+    piece at the end (see _mux_audio) -- and a part that still had an audio
+    stream would put that stream's length back in charge of where the next
+    part starts, which is what used to freeze the video at every section.
+
+    Stream copy only, so a section never needs re-rendering for this.
     """
-    fix_video = ffio.video_timescale(path) != MUX_TIMESCALE
-    fix_audio = has_audio and ffio.probe(path)["audio_rate"] != rc.audio_rate
-    if not (fix_video or fix_audio):
+    if (ffio.video_timescale(path) == MUX_TIMESCALE
+            and not ffio.has_audio(path)):
         return path
-    out = os.path.join(parts_dir, f"norm_{tag}.mp4")
+    out = os.path.join(parts_dir, f"vonly_{tag}.mp4")
     stale = (os.path.exists(out)
              and os.path.getmtime(out) < os.path.getmtime(path))
     if stale or not os.path.exists(out):
         tmp = out + ".part.mp4"
-        cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y",
-               "-i", path, "-map", "0", "-c:v", "copy"]
-        if fix_audio:
-            # re-encoding must not change how long the audio is: the part's
-            # two streams have to stay the same length or the join drifts
-            cmd += ["-af", f"apad,atrim=0:{ffio.stream_duration(path):.6f}",
-                    "-c:a", "aac", "-b:a", rc.audio_bitrate,
-                    "-ar", str(rc.audio_rate), "-ac", "2"]
-        else:
-            cmd += ["-c:a", "copy"]
-        cmd += ["-video_track_timescale", str(MUX_TIMESCALE),
-                "-movflags", "+faststart", tmp]
-        ffio.run_ffmpeg(cmd)
+        ffio.run_ffmpeg([FFMPEG, "-hide_banner", "-nostdin", "-y",
+                         "-i", path, "-map", "0:v:0", "-an", "-c:v", "copy",
+                         "-video_track_timescale", str(MUX_TIMESCALE),
+                         "-movflags", "+faststart", tmp])
         os.replace(tmp, out)
     return out
 
 
 def _encode_gap(src, a, b, out_path, mode, rc, max_gap, med_delta, ts_min,
-                has_audio, progress=None, cancel=None):
-    """Encode one untouched span [a, b) as an export part. Returns its exact
-    video duration.
+                progress=None, cancel=None):
+    """Encode one untouched span [a, b) as a video-only export part. Returns
+    its exact duration.
 
-    The audio is trimmed to the video's *measured* length rather than to a
-    predicted one, because a part whose two streams disagree is exactly what
-    breaks the join: the concat demuxer offsets everything after such a part
-    by its *longer* stream, so a part with overlong audio leaves a
-    video-shaped hole -- seen in the export as a frozen frame with silence at
-    the start of the following part. Predicting the length does not work;
-    ffprobe's packet view of a span is not the frame set ffmpeg decodes from
-    the same seek, and the muxer decides the last frame's duration itself.
+    Two passes: the video is encoded, then re-muxed by itself. The re-mux is
+    what settles its final length -- a freshly encoded stream leaves its last
+    frame with no duration at all, and only the re-mux gives it one -- and
+    that length is what the concat demuxer will use to place everything after
+    this part. It is a stream copy, so it costs no quality and little time.
 
-    Hence three passes. The video is encoded alone; then re-muxed by itself,
-    which is what settles its final length (a freshly encoded stream leaves
-    its last frame with no duration at all, and only the re-mux gives it one);
-    then the audio is encoded to that measured length with the video copied
-    alongside it. Passes two and three are stream copies, so this costs no
-    quality and little time.
+    No audio: the export's audio is laid down in one piece at the end (see
+    _mux_audio). A part carrying its own audio track was the original defect
+    here, because the concat demuxer offsets the next part by whichever
+    stream is longer.
     """
     tmp_v = out_path + ".v.mp4"
-    tmp_c = out_path + ".c.mp4"
     tmp = out_path + ".part.mp4"
     span = b - a
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y"]
@@ -384,49 +419,146 @@ def _encode_gap(src, a, b, out_path, mode, rc, max_gap, med_delta, ts_min,
                 "-crf", str(rc.crf), "-pix_fmt", "yuv420p"]
     cmd += ["-video_track_timescale", str(MUX_TIMESCALE), tmp_v]
     ffio.run_ffmpeg(cmd, duration=span, cancel=cancel,
-                    progress=(lambda p: progress(0.8 * p)) if progress
+                    progress=(lambda p: progress(0.9 * p)) if progress
                     else None)
-
-    # second pass: re-mux the video by itself, which is where its final
-    # length is decided; without audio there is nothing left to add
-    dest = tmp_c if has_audio else tmp
     try:
         ffio.run_ffmpeg(
             [FFMPEG, "-hide_banner", "-nostdin", "-y", "-i", tmp_v,
              "-map", "0:v:0", "-an", "-c:v", "copy",
              "-video_track_timescale", str(MUX_TIMESCALE),
-             "-movflags", "+faststart", dest],
+             "-movflags", "+faststart", tmp],
             duration=span, cancel=cancel,
-            progress=(lambda p: progress(0.8 + 0.1 * p)) if progress else None)
+            progress=(lambda p: progress(0.9 + 0.1 * p)) if progress else None)
     finally:
         _unlink(tmp_v)
-
-    vdur = ffio.stream_duration(dest) or span
-    if has_audio:
-        # third pass: audio encoded to exactly that length, video copied
-        cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y", "-i", tmp_c]
-        # same seek as the video pass, so the audio lines up the same way
-        if a > ts_min + 1e-3:
-            cmd += ["-ss", f"{a:.6f}"]
-        cmd += ["-t", f"{span:.6f}", "-i", src,
-                "-map", "0:v:0", "-map", "1:a:0?",
-                "-af", ("aresample=async=1:first_pts=0,"
-                        f"aformat=sample_rates={rc.audio_rate}:"
-                        "channel_layouts=stereo,"
-                        f"apad,atrim=0:{vdur:.6f}"),
-                "-c:a", "aac", "-b:a", rc.audio_bitrate,
-                "-ar", str(rc.audio_rate), "-ac", "2",
-                "-c:v", "copy", "-video_track_timescale", str(MUX_TIMESCALE),
-                "-movflags", "+faststart", tmp]
-        try:
-            ffio.run_ffmpeg(cmd, duration=vdur, cancel=cancel,
-                            progress=(lambda p: progress(0.9 + 0.1 * p))
-                            if progress else None)
-        finally:
-            _unlink(tmp_c)
     # only now is it a usable cache entry
     os.replace(tmp, out_path)
-    return vdur
+    return ffio.stream_duration(out_path) or span
+
+
+def _part_anchors(plan, ts_min):
+    """Source time of each part's first frame, plus the source time the export
+    ends at.
+
+    Read off the sections' prepared frame lists rather than off the encoded
+    parts, so it stays right even when a section was rendered by an older
+    version and came out slightly the wrong length. A section starts at its
+    own first frame; the untouched span after it starts at the first frame the
+    section does not show, which is the very frame the span will decode first.
+    """
+    anchors = []
+    cursor = ts_min
+    for item in plan:
+        if item[0] == "section":
+            sec = item[1]
+            rel, n_out, total, base, _ = _section_timeline(sec)
+            anchors.append(sec["start"] + base)
+            cursor = sec["start"] + base + total
+        else:
+            anchors.append(cursor)
+            cursor = item[2]
+    return anchors
+
+
+def _expected_durations(plan, anchors, ts_max, ext):
+    """How long each part ought to come out: the stretch of source timeline it
+    covers, plus the silence-and-held-frame its extensions add on purpose."""
+    out = []
+    for item, a, nxt in zip(plan, anchors, anchors[1:] + [ts_max]):
+        n_cuts = 0
+        if item[0] == "section":
+            rel, n_out, _, _, _ = _section_timeline(item[1])
+            n_cuts = len(_section_cuts(item[1], rel, n_out))
+        out.append(nxt - a + ext * n_cuts)
+    return out
+
+
+def _merge_segments(segs):
+    """Join source ranges that meet, and drop empty ones.
+
+    This is what makes a run with nothing spliced into it come out as a single
+    trim of the original track rather than a row of pieces butted together:
+    no join, so nothing to hear, and no chance of atrim rounding a sample in
+    or out at each seam.
+    """
+    out = []
+    for g in segs:
+        if (out and g[0] == "src" and out[-1][0] == "src"
+                and abs(out[-1][2] - g[1]) < 1e-6):
+            out[-1] = ("src", out[-1][1], g[2])
+        else:
+            out.append(g)
+    return [g for g in out
+            if (g[2] - g[1] if g[0] == "src" else g[1]) > 1e-6]
+
+
+def _audio_segments(plan, anchors, durations, ext):
+    """The whole export's audio as source ranges and silences.
+
+    The source track is kept whole. The only thing deliberately spliced into
+    it is `ext` of silence at each extension, matching the frame the picture
+    holds there; everything else runs continuously, so a section edge has no
+    join in the audio at all.
+
+    Sync is still watched. A part can come out a shade shorter or longer than
+    the stretch of source it covers -- a section's length is quantised to its
+    render grid, worth a few ms -- and those add up across an edit. The
+    running discrepancy is tracked, and the audio is re-anchored to the
+    picture only if it would otherwise drift far enough to notice. A
+    re-anchoring is a splice, so it is the lesser evil, not a free one; parts
+    rendered by the current version never need it.
+    """
+    segs = []
+    src = anchors[0] if anchors else 0.0
+    for item, anchor, dur in zip(plan, anchors, durations):
+        if dur <= 1e-6:      # nothing of this part reached the output
+            continue
+        if abs(src - anchor) > AUDIO_RESYNC:
+            src = anchor
+        cuts = []
+        if item[0] == "section":
+            sec = item[1]
+            rel, n_out, _, _, _ = _section_timeline(sec)
+            cuts = _section_cuts(sec, rel, n_out)
+        segs += _span_segments(src, dur, cuts, ext)
+        src += dur - ext * len(cuts)
+    return _merge_segments(segs)
+
+
+def _mux_audio(video_path, out_path, src, plan, anchors, durations, rc,
+               parts_dir, progress=None, cancel=None):
+    """Give the assembled (video-only) export its audio, in a single encode.
+
+    Audio built per part carries an AAC boundary at every section edge --
+    encoder priming, a truncated final frame, and whatever padding that part
+    needed to match its own video -- and those are plainly audible as a bump
+    in anything continuous, which is what music and dialogue are. Encoding the
+    whole track in one pass puts no boundary anywhere: the pieces are joined
+    as samples, before they ever reach the encoder.
+    """
+    vdur = ffio.stream_duration(video_path)
+    start = anchors[0] if anchors else 0.0
+    segs = [(g[0], g[1] - start, g[2] - start) if g[0] == "src" else g
+            for g in _audio_segments(plan, anchors, durations,
+                                     rc.extension_seconds)]
+    # the graph names every piece, so it can outgrow a command line; ffmpeg
+    # reads it from a file instead (see CMD_CHAR_LIMIT for the other case)
+    script = os.path.join(parts_dir, "audio.filter")
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(_audio_filter(segs, rc.audio_rate, vdur))
+    cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y", "-i", video_path]
+    if start > 1e-3:
+        cmd += ["-ss", f"{start:.6f}"]
+    # read past the end rather than let `apad` invent the tail: padding is
+    # silence, and silence in the middle of a scene is what a listener hears
+    cmd += ["-t", f"{vdur + 1.0:.6f}", "-i", src,
+            "-filter_complex_script", script,
+            "-map", "0:v:0", "-map", "[outa]", "-c:v", "copy",
+            "-c:a", "aac", "-b:a", rc.audio_bitrate,
+            "-ar", str(rc.audio_rate), "-ac", "2",
+            "-video_track_timescale", str(MUX_TIMESCALE),
+            "-movflags", "+faststart", out_path]
+    ffio.run_ffmpeg(cmd, duration=vdur, progress=progress, cancel=cancel)
 
 
 def _span_plan(sections, ts_min, ts_max):
@@ -450,25 +582,18 @@ def _part_signature(mode, rc, max_gap, med_delta):
         sort_keys=True).encode()).hexdigest()[:8]
 
 
-def _filter_cmd(files, out_path, rc, cwd, has_audio):
+def _filter_cmd(files, out_path, rc, cwd):
     """One ffmpeg run that decodes every part and concatenates them on the
     filter graph. Timestamps are rebuilt from scratch, so nothing here depends
-    on the parts agreeing about timebases -- at the cost of re-encoding."""
+    on the parts agreeing about timebases -- at the cost of re-encoding.
+    Video only, like every other assembly step; the audio comes later."""
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y"]
     for f in files:
         cmd += ["-i", os.path.relpath(f, cwd)]
     n = len(files)
-    if has_audio:
-        graph = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-        graph += f"concat=n={n}:v=1:a=1[outv][outa]"
-        maps = ["-map", "[outv]", "-map", "[outa]",
-                "-c:a", "aac", "-b:a", rc.audio_bitrate,
-                "-ar", str(rc.audio_rate), "-ac", "2"]
-    else:
-        graph = "".join(f"[{i}:v]" for i in range(n))
-        graph += f"concat=n={n}:v=1:a=0[outv]"
-        maps = ["-map", "[outv]", "-an"]
-    cmd += ["-filter_complex", graph] + maps
+    graph = "".join(f"[{i}:v]" for i in range(n))
+    graph += f"concat=n={n}:v=1:a=0[outv]"
+    cmd += ["-filter_complex", graph, "-map", "[outv]", "-an"]
     cmd += ["-c:v", "libx264", "-preset", rc.preset, "-crf", str(rc.crf),
             "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
             "-video_track_timescale", str(MUX_TIMESCALE),
@@ -481,13 +606,13 @@ def _cmd_chars(cmd):
     return sum(len(a) + 3 for a in cmd)
 
 
-def _filter_batches(files, out_path, rc, cwd, has_audio):
+def _filter_batches(files, out_path, rc, cwd):
     """Split `files` into the fewest runs whose commands each fit the limit."""
     batches, cur = [], []
     for f in files:
         trial = cur + [f]
-        over = _cmd_chars(_filter_cmd(trial, out_path, rc, cwd,
-                                      has_audio)) > CMD_CHAR_LIMIT
+        over = _cmd_chars(_filter_cmd(trial, out_path, rc,
+                                      cwd)) > CMD_CHAR_LIMIT
         if cur and over:
             batches.append(cur)
             cur = [f]
@@ -526,21 +651,34 @@ def filter_assembly_estimate(project, mode="reencode"):
         return {"parts": 0, "chars": 0, "limit": CMD_CHAR_LIMIT, "batches": 0,
                 "sections": 0}
     out = os.path.join(project.workdir, "export.mp4")
-    chars = _cmd_chars(_filter_cmd(files, out, rc, project.workdir,
-                                   info["has_audio"]))
-    batches = _filter_batches(files, out, rc, project.workdir,
-                              info["has_audio"])
+    chars = _cmd_chars(_filter_cmd(files, out, rc, project.workdir))
+    batches = _filter_batches(files, out, rc, project.workdir)
     return {"parts": len(files), "chars": chars, "limit": CMD_CHAR_LIMIT,
             "batches": len(batches), "sections": len(sections)}
 
 
-def _assemble_copy(files, out_path, parts_dir, list_name="concat.txt"):
+def _assemble_copy(files, out_path, parts_dir, durations=None,
+                   list_name="concat.txt"):
     """Stream-copy join through the concat demuxer: lossless and fast, but it
-    needs every part to agree about timebases (see MUX_TIMESCALE)."""
+    needs every part to agree about timebases (see MUX_TIMESCALE).
+
+    `durations` states how long each part should occupy, overriding what its
+    container claims. That matters on variable-framerate sources: the muxer
+    has to invent a duration for a part's final frame, and on VFR its guess is
+    routinely tens of ms short of the interval the source actually had there,
+    which would otherwise pull every later part forward. Stating the interval
+    holds that last frame for exactly as long as the source did.
+
+    Only ever used to lengthen a part. Claiming a part is shorter than it is
+    would overlap it with the next one, and the muxer resolves that by
+    throwing frames away.
+    """
     list_path = os.path.join(parts_dir, list_name)
     with open(list_path, "w", encoding="utf-8") as f:
-        for p in files:
+        for i, p in enumerate(files):
             f.write("file '" + _concat_escape(os.path.abspath(p)) + "'\n")
+            if durations:
+                f.write(f"duration {durations[i]:.6f}\n")
     ffio.run_ffmpeg([FFMPEG, "-hide_banner", "-nostdin", "-y",
                      "-f", "concat", "-safe", "0", "-i", list_path,
                      "-c", "copy", "-movflags", "+faststart", out_path])
@@ -552,18 +690,17 @@ def _assemble_filter(project, files, out_path, rc, parts_dir, part_sig,
     timestamp, so parts that disagree about timebases cannot desynchronise it.
     Splits into batches when one command would not fit the OS limit."""
     cwd = project.workdir
-    has_audio = project.data["info"]["has_audio"]
     cancel = job.cancelled if job else None
-    batches = _filter_batches(files, out_path, rc, cwd, has_audio)
+    batches = _filter_batches(files, out_path, rc, cwd)
     if len(batches) == 1:
-        ffio.run_ffmpeg(_filter_cmd(files, out_path, rc, cwd, has_audio),
+        ffio.run_ffmpeg(_filter_cmd(files, out_path, rc, cwd),
                         duration=total_dur, cwd=cwd, cancel=cancel,
                         progress=lambda p: prog(0.9 + 0.08 * p,
                                                 "assembling (filter)"))
         return []
     # Too many parts for one command: assemble each batch, then join the
-    # batches. They leave the same encoder with the same settings, timescale
-    # and sample rate, so that join is a stream copy -- no second generation.
+    # batches. They leave the same encoder with the same settings and
+    # timescale, so that join is a stream copy -- no second generation.
     outs = []
     for i, batch in enumerate(batches):
         if job and job.cancelled():
@@ -571,7 +708,7 @@ def _assemble_filter(project, files, out_path, rc, parts_dir, part_sig,
         bp = os.path.join(parts_dir, f"batch_{i:03d}_{part_sig}.mp4")
         base = 0.9 + 0.08 * (i / len(batches))
         ffio.run_ffmpeg(
-            _filter_cmd(batch, bp, rc, cwd, has_audio), cwd=cwd, cancel=cancel,
+            _filter_cmd(batch, bp, rc, cwd), cwd=cwd, cancel=cancel,
             progress=lambda p, b=base, n=i: prog(
                 b + 0.08 * p / len(batches),
                 f"assembling batch {n + 1}/{len(batches)}"))
@@ -651,7 +788,7 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
     # silently reused
     part_sig = _part_signature(mode, rc, max_gap, med_delta)
     for f in os.listdir(parts_dir):
-        if (f.startswith(("gap_", "norm_", "batch_"))
+        if (f.startswith(("gap_", "vonly_", "batch_", "silent_"))
                 and not f.endswith(f"_{part_sig}.mp4")):
             try:
                 os.remove(os.path.join(parts_dir, f))
@@ -673,14 +810,10 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
             return None
         if item[0] == "section":
             sec = item[1]
-            path = sec["render"]["path"]
-            if assembly != "filter":
-                # the filter join decodes everything, so a part that disagrees
-                # about timescale or sample rate costs it nothing
-                path = _normalized_part(path, parts_dir,
-                                        f"sec{sec['id']}_{part_sig}",
-                                        rc, info["has_audio"])
-            files.append(path)
+            # a section render keeps its audio so the UI can play it; the
+            # export wants every part video-only and on the shared timescale
+            files.append(_video_part(sec["render"]["path"], parts_dir,
+                                     f"sec{sec['id']}_{part_sig}"))
             continue
         _, a, b = item
         part = os.path.join(parts_dir, f"gap_{a:.3f}_{b:.3f}_{part_sig}.mp4")
@@ -688,7 +821,7 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
             base_p = done_gaps / max(1, n_gaps) * 0.9
             _encode_gap(
                 project.video_path, a, b, part, mode, rc, max_gap, med_delta,
-                ts_min, info["has_audio"],
+                ts_min,
                 progress=lambda p: prog(base_p + p * 0.9 / max(1, n_gaps),
                                         f"encoding untouched span "
                                         f"{done_gaps + 1}/{n_gaps}"),
@@ -702,10 +835,6 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
         short = (b - a) - (ffio.stream_duration(part) or (b - a))
         if short > 2 * med_delta:
             bridged += short
-        if assembly != "filter":
-            part = _normalized_part(part, parts_dir,
-                                    f"gap{done_gaps}_{part_sig}",
-                                    rc, info["has_audio"])
         files.append(part)
 
     if bridged > 0.5:
@@ -720,17 +849,57 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
             "untouched spans as-is, so they carry through to the export. "
             "Re-encode mode repairs them.")
 
+    anchors = _part_anchors(plan, ts_min)
+    encoded = [ffio.stream_duration(f) for f in files]
+    wanted = _expected_durations(plan, anchors, ts_max, rc.extension_seconds)
+    # What each part will actually occupy. A part that came out short of the
+    # stretch of source it covers is held to that stretch by the concat list
+    # (see _assemble_copy) -- routine on VFR, where the muxer has to guess the
+    # last frame's duration. A part that came out *long* cannot be fixed here;
+    # it is used as-is and warned about below.
+    stated = [max(w, e) for w, e in zip(wanted, encoded)]
+
     prog(0.9, "concatenating")
+    # the parts are joined picture-first; the audio goes on afterwards, in one
+    # continuous piece, so no join lands in the middle of an audio stream
+    silent = (os.path.join(parts_dir, f"silent_{part_sig}.mp4")
+              if info["has_audio"] else out_path)
     if assembly == "filter":
-        warnings += _assemble_filter(project, files, out_path, rc, parts_dir,
+        # the filter join rebuilds every timestamp from the decoded frames, so
+        # there is no per-file duration to state
+        stated = encoded
+        warnings += _assemble_filter(project, files, silent, rc, parts_dir,
                                      part_sig, job, prog, ts_max - ts_min)
         if job and job.cancelled():
             return None
     else:
-        _assemble_copy(files, out_path, parts_dir)
+        _assemble_copy(files, silent, parts_dir, stated)
+
+    # A section rendered by an older version comes out a frame or two longer
+    # than the source it covers, which is where a stubbornly-too-long export
+    # comes from. The audio copes (it re-anchors itself), but the picture can
+    # only be put right by re-rendering.
+    off = sum(e - w for e, w in zip(encoded, wanted) if e > w)
+    if off > 0.25:
+        warnings.append(
+            f"The parts run {off:+.2f}s longer than the source's own timing. "
+            "Sections rendered by an older version of the tool are slightly "
+            "too long; re-render them ('Render full-res') and export again "
+            "to get the timing exact.")
+
+    if info["has_audio"]:
+        prog(0.95, "adding audio")
+        try:
+            _mux_audio(silent, out_path, project.video_path, plan, anchors,
+                       stated, rc, parts_dir,
+                       progress=lambda p: prog(0.95 + 0.03 * p,
+                                               "adding audio"),
+                       cancel=(job.cancelled if job else None))
+        finally:
+            _unlink(silent)
 
     prog(0.98, "sanity-checking output timing")
-    warnings += _timing_sanity(out_path, files)
+    warnings += _timing_sanity(out_path, files, sum(stated))
 
     entry = {"path": out_path, "mode": mode, "assembly": assembly,
              "verify": None, "warnings": warnings}
@@ -749,17 +918,15 @@ def _near_keyframe(t, keyframes, edge, tol=0.005):
     return i < len(keyframes) and abs(keyframes[i] - t) <= tol
 
 
-def _timing_sanity(path, part_files):
+def _timing_sanity(path, part_files, expected):
     """Catch broken concat output (frozen-video holes): the final file's
-    video span must equal the sum of the actual parts, with no big pts gaps."""
+    video span must be the length the parts were laid out to occupy, with no
+    pts gaps beyond the ones the parts already had."""
     warnings = []
     try:
-        expected = 0.0
         part_holes = 0
         for f in part_files:
-            pidx = ffio.index_video(f)
-            expected += pidx["ts_max"] - pidx["ts_min"]
-            part_holes += pidx.get("holes", 0)
+            part_holes += ffio.index_video(f).get("holes", 0)
         idx = ffio.index_video(path)
     except Exception as e:  # noqa: BLE001 - advisory check only
         return [f"Could not sanity-check output timing: {e}"]
