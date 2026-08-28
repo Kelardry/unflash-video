@@ -10,7 +10,8 @@ import threading
 import time
 
 from .config import (DEFAULT_PROFILE, PROFILES, DetectorConfig,
-                     RenderConfig, profile_config, profile_name)
+                     RenderConfig, detector_signature, profile_config,
+                     profile_name)
 from . import ffio
 
 
@@ -55,6 +56,32 @@ SECTION_RENDERS = (
     ("preview", "preview.mp4", "preview render"),
     ("render", "render.mp4", "full-res render"),
 )
+
+
+class SectionNotFound(KeyError):
+    """Asked for a section the project does not have -- usually one deleted
+    in another tab, or left on screen by a stale section list."""
+
+    def __str__(self):
+        # KeyError's own __str__ is the repr of its argument, quotes and all;
+        # this message is shown to the user as-is
+        return self.args[0] if self.args else "No such section"
+
+
+def verdict_stale(verdict, sig, profile):
+    """Whether a stored verdict was produced under different detection
+    settings than the ones in force now. ``None`` when the verdict does not
+    say which settings it came from (written before they were recorded) and
+    no comparison is possible."""
+    if not isinstance(verdict, dict):
+        return None
+    saved_sig = verdict.get("detector_sig")
+    if saved_sig:
+        return saved_sig != sig
+    saved_prof = verdict.get("profile")
+    if saved_prof and saved_prof != "custom" and profile != "custom":
+        return saved_prof != profile
+    return None
 
 
 def same_path(a, b):
@@ -628,7 +655,9 @@ class Project:
     def section(self, sid):
         sec = self.data["sections"].get(str(sid))
         if sec is None:
-            raise KeyError(f"No section {sid}")
+            raise SectionNotFound(
+                f"No section #{sid} — it is not part of this project "
+                "any more (deleted?)")
         return sec
 
     def remove_section(self, sid):
@@ -660,6 +689,45 @@ class Project:
                         "preview": None, "render": None})
             self.save()
             return sec
+
+    def refresh_labels(self):
+        """Drop the labels a section carries that no longer describe it.
+
+        Two things make a label go stale without anything about the section
+        changing: the file it refers to leaves the work folder, and the
+        detection profile changes underneath a recorded verdict. Renders
+        themselves are kept -- only the verdict attached to one is dropped,
+        so the section reads as rendered-but-unchecked and can be re-checked
+        or re-rendered. Safety checks are cheap to redo, so one that cannot
+        say which settings produced it is dropped too."""
+        with self.lock:
+            notes = self._repair_paths()
+            sig = detector_signature(self.data["detector"])
+            prof = profile_name(self.data["detector"])
+            cleared, unverified = [], []
+            for sec in self.sections_sorted():
+                sid = sec["id"]
+                v = sec.get("check")
+                if isinstance(v, dict):
+                    stale = verdict_stale(v, sig, prof)
+                    if stale is not False:
+                        sec["check"] = None
+                        cleared.append(
+                            f"#{sid} safety check"
+                            + ("" if stale else " (settings not recorded)"))
+                for key, label in (("preview", "preview verdict"),
+                                   ("render", "render verdict")):
+                    ent = sec.get(key)
+                    if not isinstance(ent, dict) or not ent.get("verdict"):
+                        continue
+                    stale = verdict_stale(ent["verdict"], sig, prof)
+                    if stale is True:
+                        ent["verdict"] = None
+                        cleared.append(f"#{sid} {label}")
+                    elif stale is None:
+                        unverified.append(f"#{sid} {label}")
+            self.save()
+        return {"cleared": cleared, "unverified": unverified, "notes": notes}
 
     @staticmethod
     def edits_signature(edits):

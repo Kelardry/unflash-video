@@ -27,6 +27,8 @@ Profiles:
                                measure.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass, asdict, fields
 
 
@@ -114,6 +116,21 @@ DEFAULT_PROFILE = "wcag_ext"
 def profile_config(name) -> DetectorConfig:
     factory = PROFILES.get(name)
     return factory() if factory else None
+
+
+# The section_* settings only steer how a scan carves the video into work
+# sections; they cannot change what a detector says about a stretch of frames.
+# Everything else can, so a stored verdict is identified by those fields.
+VERDICT_FIELDS = tuple(f.name for f in fields(DetectorConfig)
+                       if not f.name.startswith("section_"))
+
+
+def detector_signature(detector_dict) -> str:
+    """Short stable id for the detection settings a verdict was produced
+    under, so a verdict recorded under different settings can be spotted."""
+    d = DetectorConfig.from_dict(detector_dict).to_dict()
+    blob = json.dumps({k: d[k] for k in VERDICT_FIELDS}, sort_keys=True)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def profile_name(detector_dict) -> str:

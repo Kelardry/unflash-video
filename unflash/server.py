@@ -24,7 +24,7 @@ from .analysis import analyze_file, violations_to_sections, timeline_summary
 from .config import profile_config, profile_name
 from .editing import prepare_section, suggest_edits, check_section
 from .jobs import JobManager
-from .project import Project, project_dir_video
+from .project import Project, SectionNotFound, project_dir_video
 from .render import (render_section, export_video, verify_file,
                      filter_assembly_estimate)
 
@@ -47,6 +47,13 @@ def proj() -> Project:
 
 def _err(e, code=400):
     return jsonify({"error": str(e)}), code
+
+
+@app.errorhandler(SectionNotFound)
+def handle_missing_section(e):
+    """A section the project no longer has: a plain 404 so the UI can tell
+    "it's gone" from "something broke" and tidy its list."""
+    return jsonify({"error": str(e)}), 404
 
 
 @app.errorhandler(Exception)
@@ -426,10 +433,17 @@ def patch_section(sid):
 
 @app.post("/api/prepare_all")
 def prepare_all():
+    """Prepare every section that needs it -- or, with ``force``, every
+    section again: re-analyzing under a changed profile and rebuilding
+    proxies and thumbnails without touching the frame marks."""
     p = proj()
-    todo = [s["id"] for s in p.sections_sorted() if not s.get("prepared")]
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force"))
+    todo = [s["id"] for s in p.sections_sorted()
+            if force or not s.get("prepared")]
     if not todo:
-        return _err("All sections are already prepared", 400)
+        return _err("No sections to prepare" if force else
+                    "All sections are already prepared", 400)
 
     def run(job):
         done = 0
@@ -451,7 +465,7 @@ def prepare_all():
             done += 1
         return {"prepared": done, "total": len(todo)}
 
-    job = jobs.start("prepare all", run)
+    job = jobs.start("re-prepare all" if force else "prepare all", run)
     return jsonify({"job": job.id})
 
 
@@ -483,7 +497,11 @@ def set_edits(sid):
 
 @app.post("/api/render_all")
 def render_all():
+    """Render every prepared section that is not already up to date -- or,
+    with ``force``, every prepared section again."""
     p = proj()
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force"))
     todo = []
     skipped = []
     unprepared = []
@@ -492,13 +510,14 @@ def render_all():
             unprepared.append(s["id"])
             continue
         r = s.get("render")
-        if (r and r.get("path") and os.path.exists(r["path"])
+        if (not force and r and r.get("path") and os.path.exists(r["path"])
                 and not Project.render_stale(s)):
             skipped.append(s["id"])
         else:
             todo.append(s["id"])
     if not todo:
-        msg = "Nothing to render — all prepared sections are up to date."
+        msg = ("No prepared sections to render." if force else
+               "Nothing to render — all prepared sections are up to date.")
         if unprepared:
             msg += " Unprepared: #" + ", #".join(unprepared)
         return _err(msg, 400)
@@ -525,8 +544,55 @@ def render_all():
         return {"rendered": done, "total": len(todo),
                 "skipped": len(skipped), "unprepared": unprepared}
 
-    job = jobs.start("render all", run)
+    job = jobs.start("re-render all" if force else "render all", run)
     return jsonify({"job": job.id})
+
+
+@app.post("/api/check_all")
+def check_all():
+    """Re-run the fast safety simulation on every prepared section, so the
+    check verdicts all describe the current edits and detection profile."""
+    p = proj()
+    todo, unprepared = [], []
+    for s in p.sections_sorted():
+        (todo if s.get("prepared") else unprepared).append(s["id"])
+    if not todo:
+        msg = "No prepared sections to check."
+        if unprepared:
+            msg += " Unprepared: #" + ", #".join(unprepared)
+        return _err(msg, 400)
+
+    def run(job):
+        safe = unsafe = 0
+        failed = []
+        for k, sid in enumerate(todo):
+            if job.cancelled():
+                break
+            job.set_progress(k / len(todo),
+                             f"section #{sid} ({k + 1}/{len(todo)})")
+            try:
+                verdict = check_section(p, sid)
+            except Exception as e:      # noqa: BLE001 - reported to the UI
+                failed.append(f"#{sid}: {e}")
+                continue
+            if verdict.get("safe"):
+                safe += 1
+            else:
+                unsafe += 1
+        return {"checked": safe + unsafe, "total": len(todo),
+                "safe": safe, "unsafe": unsafe,
+                "failed": failed, "unprepared": unprepared}
+
+    job = jobs.start("check all", run)
+    return jsonify({"job": job.id})
+
+
+@app.post("/api/refresh_labels")
+def refresh_labels():
+    """Drop section labels that no longer describe the project — verdicts
+    left over from a different detection profile, and entries whose files
+    have gone from the work folder."""
+    return jsonify(proj().refresh_labels())
 
 
 @app.post("/api/section/<sid>/suggest")

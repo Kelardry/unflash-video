@@ -98,10 +98,24 @@ aside#sections {
    instead of overflowing it sideways; they share the row evenly and wrap
    rather than overflow if the text ever gets bigger */
 .side-head { display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
-  margin-bottom: 8px; }
+  margin-bottom: 8px; position: relative; }
 .side-head h2 { margin: 0 0 2px; flex-basis: 100%; }
 .side-head button.small { flex: 1 0 auto; font-size: 11px; padding: 3px 6px;
   white-space: nowrap; }
+/* the do-all dropdown hangs off the whole header rather than off its button,
+   so it can never be wider than the sidebar it is clipped by */
+.menu { position: absolute; z-index: 40; top: 100%; left: 0; right: 0;
+  margin-top: 4px; padding: 4px; display: flex; flex-direction: column;
+  gap: 2px; background: var(--bg3); border: 1px solid #3a4050;
+  border-radius: 8px; box-shadow: 0 8px 22px rgba(0, 0, 0, .5); }
+.menu button.menu-item { width: 100%; text-align: left; border: 0;
+  background: none; border-radius: 5px; padding: 5px 8px; font-size: 12px;
+  white-space: nowrap; }
+.menu button.menu-item:hover:not(:disabled) { background: #333a4a; }
+.menu button.menu-item.danger { color: var(--bad); }
+.menu button.menu-item.danger:hover:not(:disabled) { background: #402024; }
+.menu-sep { height: 1px; background: #3a4050; margin: 3px 2px; }
+
 .timeline-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .addsec { display: flex; gap: 4px; align-items: center; padding-bottom: 4px; }
 .addsec input { font-size: 11px; padding: 2px 6px; }

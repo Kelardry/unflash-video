@@ -117,6 +117,24 @@ Note that two accounts opening the *same* video still share the one
    of its parts. Then **Verify exported file** re-scans the final output
    with your selected detector profile.
 
+The sidebar's **all sections ▾** menu runs one step over the whole project
+at once, for when the detection profile changed or a new version of the
+program made a processing step worth repeating:
+
+- **re-prepare all** — analyze every section again under the current profile
+  and rebuild its proxy and thumbnails. Frame marks are kept; a section whose
+  frame count comes out different says so in its warnings, because the marks
+  are held by frame ordinal.
+- **re-render all** — render every prepared section again, including ones
+  already up to date (which *render all* would skip).
+- **re-check all** — re-run the instant safety simulation everywhere.
+- **refresh all labels** — drop the badges that no longer describe the
+  project: check and render verdicts recorded under a different detection
+  profile, and entries whose files have left the work folder. Renders
+  themselves are kept — only the verdict on one is dropped, so it reads as
+  *rendered, unchecked* until you re-check or re-render it.
+- **delete all** — remove every section, with its edits and renders.
+
 The 🔔 field in the header sets a threshold (minutes): any operation that
 takes longer triggers a beep + desktop notification when it finishes.
 

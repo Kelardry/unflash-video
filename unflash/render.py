@@ -322,6 +322,7 @@ def render_section(project, sid, source, out_path, job=None,
         res = analyze_file(out_path, cfg)
         verdict = res.to_dict()
         verdict["profile"] = _profile_name(project)
+        verdict["detector_sig"] = _detector_sig(project)
 
     entry = {"path": out_path, "verdict": verdict, "warning": warn,
              "source": source, "grid_fps": grid,
@@ -343,6 +344,11 @@ def _unlink(path):
 def _profile_name(project):
     from .config import profile_name
     return profile_name(project.data["detector"])
+
+
+def _detector_sig(project):
+    from .config import detector_signature
+    return detector_signature(project.data["detector"])
 
 
 def _emit(pipe, frame_bytes, slot, end_t, grid):
@@ -962,4 +968,5 @@ def verify_file(project, path, job=None):
         cancel=(job.cancelled if job else None))
     out = res.to_dict()
     out["profile"] = _profile_name(project)
+    out["detector_sig"] = _detector_sig(project)
     return out

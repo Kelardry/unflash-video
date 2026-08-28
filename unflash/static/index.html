@@ -58,7 +58,15 @@
       <h2>Sections</h2>
       <button id="btnPrepareAll" class="small" title="Prepare every section that isn't prepared yet">prepare all</button>
       <button id="btnRenderAll" class="small" title="Render every prepared section at full resolution, skipping ones already rendered with current edits">render all</button>
-      <button id="btnDeleteAll" class="small danger" title="Delete every section, including their edits and renders">delete all</button>
+      <button id="btnAllMenu" class="small" aria-haspopup="true" aria-expanded="false" title="Re-run a processing step over every section, or delete them all">all sections ▾</button>
+      <div id="allMenu" class="menu hidden" role="menu">
+        <button class="menu-item" data-act="reprepare" role="menuitem" title="Analyze every section again with the current detection profile and rebuild its proxy and thumbnails — your frame marks are kept">re-prepare all</button>
+        <button class="menu-item" data-act="rerender" role="menuitem" title="Render every prepared section at full resolution again, including ones already up to date">re-render all</button>
+        <button class="menu-item" data-act="recheck" role="menuitem" title="Re-run the instant safety check on every prepared section with the current detection profile">re-check all</button>
+        <button class="menu-item" data-act="labels" role="menuitem" title="Drop the check and render verdicts left over from a different detection profile, and entries whose files are gone">refresh all labels</button>
+        <div class="menu-sep"></div>
+        <button class="menu-item danger" data-act="delete" role="menuitem" title="Delete every section, including their edits and renders">delete all</button>
+      </div>
     </div>
     <div id="sectionList" class="section-list"></div>
   </aside>

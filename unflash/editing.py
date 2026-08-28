@@ -14,6 +14,7 @@ import numpy as np
 
 from . import ffio
 from .analysis import FlashDetector, _LUT, analyze_frames
+from .config import detector_signature, profile_name
 
 
 def prepare_section(project, sid, job=None):
@@ -82,6 +83,14 @@ def prepare_section(project, sid, job=None):
         warnings.append(
             f"Thumbnail count ({n_thumbs}) != decoded frame count "
             f"({len(rel_pts)}); some grid images may be missing or shifted.")
+    # re-preparing keeps the frame marks, which are held by ordinal: if this
+    # pass decoded a different number of frames, they no longer line up
+    was = sec.get("n_frames") or 0
+    if sec.get("prepared") and sec.get("edits") and was and was != len(rel_pts):
+        warnings.append(
+            f"Re-prepared with {len(rel_pts)} frames where the marks were "
+            f"made against {was}; your marks were kept but now sit on "
+            "different frames — check them before rendering.")
 
     with project.lock:
         sec["prepared"] = True
@@ -308,6 +317,10 @@ def check_section(project, sid, edits=None):
     use_edits = edits if edits is not None else sec["edits"]
     result = simulate_edits(frames, sec["pts"], use_edits, cfg, aw, ah, ext_s)
     verdict = result.to_dict()
+    # record the settings behind the verdict, so a later profile change can be
+    # told from a verdict that still describes the project as it stands
+    verdict["profile"] = profile_name(project.data["detector"])
+    verdict["detector_sig"] = detector_signature(project.data["detector"])
 
     # map violation windows back to frame ordinals via the simulated
     # display timeline (extensions shift everything after them)

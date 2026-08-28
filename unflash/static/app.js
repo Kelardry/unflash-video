@@ -175,8 +175,10 @@ async function refreshProject(openSid = null) {
     `${info.fps.toFixed(2)} fps, ${fmtTime(bounds()[1] - bounds()[0])}`;
   if (p.profile) $("profileSel").value = p.profile;
   $("timelineWrap").classList.remove("hidden");
-  drawTimeline();
+  // the list first: it is what gets clicked, so it must not be left stale by
+  // anything that goes wrong while drawing the timeline canvas
   renderSectionList();
+  drawTimeline();
   if (openSid) openSection(openSid);
   else if (state.sectionId && p.sections[state.sectionId]) openSection(state.sectionId);
 }
@@ -273,7 +275,9 @@ $("profileSel").onchange = async () => {
   try {
     const prof = $("profileSel").value;
     const r = await api("/api/settings", "POST", { profile: prof });
-    let msg = "Detection profile changed — re-scan and re-prepare sections to apply it.";
+    let msg = "Detection profile changed — re-scan, then use the sidebar's "
+      + "'all sections' menu to re-prepare, re-check and refresh labels "
+      + "under it without losing your edits.";
     if (r.detector && r.detector.extended_mode === "off") {
       msg += " This profile does not report extended flashes; sections already created for them stay until you delete them.";
     }
@@ -494,19 +498,150 @@ $("btnRenderAll").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
-$("btnDeleteAll").onclick = async () => {
-  const n = Object.keys((state.project || {}).sections || {}).length;
+// ---------- "all sections" menu ----------
+// Re-runs of a processing step over every section: changing the detection
+// profile, or moving to a new version of the program, makes the whole project
+// worth putting through a step again without starting over and losing edits.
+function sectionCount() {
+  return Object.keys((state.project || {}).sections || {}).length;
+}
+
+function closeAllMenu() {
+  $("allMenu").classList.add("hidden");
+  $("btnAllMenu").setAttribute("aria-expanded", "false");
+}
+
+$("btnAllMenu").onclick = () => {
+  const opened = $("allMenu").classList.toggle("hidden") === false;
+  $("btnAllMenu").setAttribute("aria-expanded", String(opened));
+};
+document.addEventListener("click", (ev) => {
+  if (!ev.target.closest("#allMenu, #btnAllMenu")) closeAllMenu();
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") closeAllMenu();
+});
+
+$("allMenu").onclick = (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  closeAllMenu();
+  const act = ALL_ACTIONS[btn.dataset.act];
+  if (act) act();
+};
+
+// a bulk run can change any section, including the open one
+function afterBulk() {
+  refreshProject();
+}
+
+// stop showing a section: used when it has been deleted, and when opening one
+// fails because it is no longer there
+function forgetOpenSection() {
+  state.sectionId = null;
+  state.section = null;
+  $("workspace").classList.add("hidden");
+  $("welcome").classList.remove("hidden");
+}
+
+async function reprepareAll() {
+  const n = sectionCount();
+  if (!n) { toast("No sections yet"); return; }
+  if (!confirm(`Re-prepare all ${n} sections?\n\n`
+    + "Each one is analyzed again with the current detection profile and its "
+    + "proxy and thumbnails are rebuilt. Your frame marks are kept. This "
+    + "takes about as long as preparing them the first time.")) return;
+  try {
+    const r = await api("/api/prepare_all", "POST", { force: true });
+    pollJob(r.job, "Re-preparing all sections", (res) => {
+      toast(`Re-prepared ${res.prepared}/${res.total} sections.`);
+      afterBulk();
+    });
+  } catch (e) { toast(e.message, true); }
+}
+
+async function rerenderAll() {
+  const n = sectionCount();
+  if (!n) { toast("No sections yet"); return; }
+  if (!confirm("Re-render every prepared section at full resolution?\n\n"
+    + "Sections already rendered with their current edits are rendered again "
+    + "too, so this can take a long time.")) return;
+  try {
+    const r = await api("/api/render_all", "POST", { force: true });
+    pollJob(r.job, "Re-rendering all sections", (res) => {
+      let msg = `Re-rendered ${res.rendered}/${res.total} sections.`;
+      if ((res.unprepared || []).length) {
+        msg += ` Skipped unprepared: #${res.unprepared.join(", #")}.`;
+      }
+      toast(msg, (res.unprepared || []).length > 0);
+      afterBulk();
+    });
+  } catch (e) { toast(e.message, true); }
+}
+
+async function recheckAll() {
+  try {
+    const r = await api("/api/check_all", "POST", {});
+    pollJob(r.job, "Re-checking all sections", (res) => {
+      let msg = `Checked ${res.checked}/${res.total} sections: `
+        + `${res.safe} pass, ${res.unsafe} fail.`;
+      if ((res.unprepared || []).length) {
+        msg += ` Skipped unprepared: #${res.unprepared.join(", #")}.`;
+      }
+      const bad = (res.failed || []).length;
+      if (bad) msg += ` ${plural(bad, "section", "sections")} could not be checked.`;
+      toast(msg, bad > 0 || res.unsafe > 0);
+      if (bad) showNotes(res.failed.map((f) => `Could not check ${f}`));
+      afterBulk();
+    });
+  } catch (e) { toast(e.message, true); }
+}
+
+async function refreshAllLabels() {
+  try {
+    const r = await api("/api/refresh_labels", "POST", {});
+    await refreshProject();
+    const notes = (r.notes || []).slice();
+    if (r.cleared.length) {
+      notes.push("Cleared labels that no longer describe the project: "
+        + r.cleared.join(", ") + ".");
+    }
+    if (r.unverified.length) {
+      notes.push("These verdicts do not record which detection settings "
+        + "produced them, so they were left as they are — re-render to be "
+        + "sure of them: " + r.unverified.join(", ") + ".");
+    }
+    showNotes(notes);
+    toast(r.cleared.length
+      ? `Cleared ${plural(r.cleared.length, "stale label", "stale labels")} — see the message at the top.`
+      : "Every label is up to date.");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteAllSections() {
+  const n = sectionCount();
   if (!n) { toast("No sections to delete"); return; }
   if (!confirm(`Delete ALL ${n} sections, including their edits and renders? This cannot be undone.`)) return;
   try {
     const r = await api("/api/sections", "DELETE");
     toast(`Deleted ${r.deleted} sections.`);
-    state.sectionId = null;
-    state.section = null;
-    $("workspace").classList.add("hidden");
-    $("welcome").classList.remove("hidden");
-    refreshProject();
+    forgetOpenSection();
+    // the server has no sections now, so say so locally too: the sidebar is
+    // then right even if the refresh below fails or is overtaken by an
+    // in-flight refresh from some other operation
+    if (state.project) state.project.sections = {};
+    renderSectionList();
+    drawTimeline();
+    await refreshProject();
   } catch (e) { toast(e.message, true); }
+}
+
+const ALL_ACTIONS = {
+  reprepare: reprepareAll,
+  rerender: rerenderAll,
+  recheck: recheckAll,
+  labels: refreshAllLabels,
+  delete: deleteAllSections,
 };
 
 $("btnHome").onclick = () => {
@@ -555,7 +690,18 @@ async function openSection(sid) {
       renderGrid();
       drawChart();
     }
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+    if (e.status === 404) {
+      // the section is gone from the project but still listed here: whatever
+      // left the sidebar behind, clicking a stale entry now clears it
+      forgetOpenSection();
+      if (state.project) delete state.project.sections[String(sid)];
+      renderSectionList();
+      drawTimeline();
+      refreshProject().catch(() => {});
+    }
+  }
 }
 
 $("btnApplyRange").onclick = async () => {
@@ -622,11 +768,15 @@ $("btnPrepare").onclick = async () => {
 
 $("btnDeleteSection").onclick = async () => {
   if (!confirm("Delete this section (its edits and renders)?")) return;
-  await api(`/api/section/${state.sectionId}`, "DELETE");
-  state.sectionId = null;
-  $("workspace").classList.add("hidden");
-  $("welcome").classList.remove("hidden");
-  refreshProject();
+  const sid = state.sectionId;
+  try {
+    await api(`/api/section/${sid}`, "DELETE");
+    forgetOpenSection();
+    if (state.project) delete state.project.sections[sid];
+    renderSectionList();
+    drawTimeline();
+    await refreshProject();
+  } catch (e) { toast(e.message, true); }
 };
 
 // ---------- player ----------
