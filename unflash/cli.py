@@ -51,8 +51,10 @@ def main(argv=None):
             print(f"frames={out['frames']} duration={out['duration']:.2f}s "
                   f"safe={out['safe']}")
             for v in out["violations"]:
-                print(f"  {v['kind']:>9}  {v['start']:8.3f} - {v['end']:8.3f}"
-                      f"  (count {v['count']:.0f})")
+                # onset is where the flashing that adds up to the failure
+                # starts; peak is the worst moment to go and look at
+                print(f"  {v['kind']:>9}  {v['onset']:8.3f} - {v['end']:8.3f}"
+                      f"  (worst {v['peak']:.3f}, count {v['count']:.0f})")
             if not out["violations"]:
                 print("  no violations")
     else:

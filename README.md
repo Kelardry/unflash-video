@@ -94,7 +94,11 @@ Note that two accounts opening the *same* video still share the one
    through the detector without rendering anything. If it fails, **select
    unsafe frames** highlights exactly the frames inside the failing
    window(s). Frames in flash events carry a corner dot: yellow for general
-   flashes, magenta for red flashes.
+   flashes, magenta for red flashes. The simulation is fed the real footage
+   on either side of the section as well (see *Sections that close*, below),
+   so it starts in the state a pass over the whole export would reach the
+   section in, and it will also tell you about flashing your edits leave
+   just *past* the section's end.
 6. **Preview render** — applies edits at proxy resolution (decoded from the
    original, so frames always line up) and re-verifies the rendered file.
 7. **Render full-res** — **required for every section before export** (or
@@ -210,6 +214,51 @@ Because extended flashes are not WCAG failures, verdicts distinguish them: a
 section or exported file whose only remaining problems are extended flashes
 still passes WCAG, and the UI says so while marking it unsafe for the
 active profile.
+
+## Sections that close
+
+The point of a work section is that editing it until it passes should mean
+the exported video passes. Two things have to be true for that:
+
+**A section has to contain the frames responsible for its own violation.**
+A general-flash failure is more than three flashes in a second, so the
+detector can only announce one when the last of those flashes lands — up to
+a second after the flashing began. Padding a section out from the
+announcement therefore left the run-in that caused it outside the section,
+where nothing could be done about it. Every violation now carries an
+`onset`, the exact moment of the earliest transition still inside its
+failure window, and sections are padded from there. It adds about a second
+to the head of a section and creates no new ones.
+
+**A section's check has to see what a pass over the whole video sees.**
+The detector carries state: a flash is a pair of transitions up to a second
+apart, and the failure test looks back over a second of flashes. Checking a
+section on its own started it cold at the section's first frame, which left
+it blind for roughly its first second — flashing there passed the check and
+then turned up when the finished export was verified, "inside a section that
+was already safe". Preparing a section now also caches a few seconds of the
+footage before and after it, and the check, the suggester and the rendered
+section's verdict all run over run-up + section + run-out. Where that
+footage falls inside a *neighbouring* section, the neighbour's edited frames
+are used rather than the original ones, so a check never reports flashing
+you have already removed somewhere else. Flashing found in the run-out is
+reported separately: if it lands in the next section it is that section's to
+fix, and otherwise it is flagged as something your edits pushed past the end.
+Which side of a boundary a failure falls on is decided by where its *flashing*
+is, never by how far its onset reaches back — the onset exists to widen a
+section, and letting it decide ownership blames a section for flashing that
+starts after its last frame and then offers its final frames as the fix.
+
+Because a section's check now reads its neighbours' edits, editing one
+section clears the recorded verdict of any section close enough to have read
+it; they show as unchecked until you re-check.
+
+Sections prepared by an earlier version have no cached run-up. They still
+check, but cold — the check says so, and preparing them again fixes it.
+
+Violations are reported with their onset, their end, and the worst moment
+inside them, because a long flashing passage merges into one span and the
+span alone does not say where to look.
 
 ## Messy real-world files
 

@@ -9,11 +9,13 @@ through the same detector used for scanning.
 """
 
 import os
+from dataclasses import asdict
 
 import numpy as np
 
 from . import ffio
-from .analysis import FlashDetector, _LUT, analyze_frames
+from .analysis import (FlashDetector, _LUT, analyze_frames,
+                       context_seconds)
 from .config import detector_signature, profile_name
 
 # How many frames are compared when checking that a fresh decode of a section
@@ -151,6 +153,48 @@ def cache_shift(project, sid, probe=ALIGN_PROBE, cap=ALIGN_CAP):
     return best_shift(np.asarray(fresh), ref)[0]
 
 
+def _cache_context(project, sec, sdir, aw, ah, cancel=None):
+    """Decode and cache the footage either side of a section.
+
+    The detector needs a run-up before its verdict at the section's first
+    frame matches what a pass over the whole video says there, and a run-out
+    before it can tell whether an edit has pushed flashing past the section's
+    last frame. Both are decoded once, here, so the fast check stays fast.
+    """
+    cfg = project.detector_config
+    need = context_seconds(cfg)
+    ts_min, ts_max = project.bounds
+    start, end = sec["start"], sec["end"]
+    lead_from = max(ts_min, start - need)
+    tail_to = min(ts_max, end + need)
+    lead, lead_pts, tail, tail_pts = [], [], [], []
+    if start - lead_from > 1e-3:
+        for t, fr in ffio.iter_frames(project.video_path, aw, ah,
+                                      start=lead_from,
+                                      duration=start - lead_from,
+                                      cancel=cancel):
+            if t >= start - 1e-6:
+                break
+            lead.append(fr.copy())
+            lead_pts.append(round(t - start, 6))     # negative
+    if tail_to - end > 1e-3:
+        for t, fr in ffio.iter_frames(project.video_path, aw, ah,
+                                      start=end, duration=tail_to - end,
+                                      cancel=cancel):
+            if t <= end + 1e-6:
+                continue
+            tail.append(fr.copy())
+            tail_pts.append(round(t - start, 6))
+    path = os.path.join(sdir, "context_frames.npy")
+    if lead or tail:
+        np.save(path, np.stack(lead + tail))
+    else:
+        path = None
+    return {"npy": path, "lead_n": len(lead), "tail_n": len(tail),
+            "lead_pts": lead_pts, "tail_pts": tail_pts,
+            "seconds": need}
+
+
 def prepare_section(project, sid, job=None):
     """Analyze the section, cache analysis frames, build proxy + thumbnails."""
     sec = project.section(sid)
@@ -208,6 +252,9 @@ def prepare_section(project, sid, job=None):
     np.save(cache_npy, np.stack(frames))
     del frames
 
+    prog(0.48, "decoding run-up frames")
+    ctx_meta = _cache_context(project, sec, sdir, aw, ah, cancel)
+
     prog(0.5, "encoding proxy")
     proxy = os.path.join(sdir, "proxy.mp4")
     ffio.make_proxy(project.video_path, proxy, start, dur, rc,
@@ -256,6 +303,7 @@ def prepare_section(project, sid, job=None):
         sec["thumbs"] = thumbs
         sec["n_thumbs"] = n_thumbs
         sec["cache_npy"] = cache_npy
+        sec["context"] = ctx_meta
         sec["analysis"] = result.to_dict(include_stats=True)
         sec["warnings"] = warnings
         project.save()
@@ -277,10 +325,236 @@ def _parse_edits(edits):
     return out
 
 
-def simulate_edits(frames, rel_pts, edits, cfg, aw, ah,
-                   extension_seconds=1.0):
-    """Run the detector over the *edited* frame sequence without rendering."""
-    det = FlashDetector(cfg, aw, ah)
+class SectionContext:
+    """The footage on either side of a section, as the export will contain it.
+
+    `lead` runs up to the section's first frame (times are negative, ending
+    one frame before 0) and `tail` runs on from its last (times are relative
+    to the end of the edited section). Frames are at analysis resolution.
+    `notes` records anything that made the context less than complete, so a
+    verdict built on it can say so.
+    """
+
+    __slots__ = ("lead", "lead_pts", "tail", "tail_pts", "notes", "next_at")
+
+    def __init__(self, lead, lead_pts, tail, tail_pts, notes=None,
+                 next_at=None):
+        self.lead = lead
+        self.lead_pts = lead_pts
+        self.tail = tail
+        self.tail_pts = tail_pts
+        self.notes = notes or []
+        # how far into the run-out the *next* section starts, or None if none
+        # does. Flashing from there on is that section's to fix; before it the
+        # material is untouched by any section, so flashing the edits pushed
+        # out there is nobody else's problem.
+        self.next_at = next_at
+
+    def __bool__(self):
+        return bool(len(self.lead) or len(self.tail))
+
+
+def _median_dt(pts, fallback=1.0 / 30):
+    if len(pts) < 2:
+        return fallback
+    d = np.diff(np.asarray(pts, float))
+    d = d[d > 0]
+    return float(np.median(d)) if d.size else fallback
+
+
+def _npy_len(path):
+    """Frame count of a cached .npy, without leaving the file mapped."""
+    arr = np.load(path, mmap_mode="r")
+    try:
+        return int(arr.shape[0])
+    finally:
+        mm = getattr(arr, "_mmap", None)
+        if mm is not None:
+            mm.close()
+
+
+def _take_frames(path, idxs):
+    """Copy the given frames out of a cached .npy and let go of the file.
+
+    The copy is the point: a numpy memmap (or any view onto one) keeps the
+    file open, and on Windows that blocks preparing the section again, which
+    rewrites exactly these caches.
+    """
+    arr = np.load(path, mmap_mode="r")
+    try:
+        return [np.array(arr[i]) for i in idxs]
+    finally:
+        mm = getattr(arr, "_mmap", None)
+        if mm is not None:
+            mm.close()
+
+
+def _sections_in(project, sid, t_lo, t_hi):
+    """Other sections overlapping a source-time window, in time order."""
+    return [s for s in project.sections_sorted()
+            if str(s["id"]) != str(sid)
+            and s["end"] > t_lo + 1e-6 and s["start"] < t_hi - 1e-6]
+
+
+def _edited_edge(project, sec, seconds, side, ext_s):
+    """The last (side='lead') or first (side='tail') `seconds` of another
+    section as the export will contain it -- its cached frames with its own
+    edits applied.
+
+    A section close enough to fall inside this one's run-up or run-out is
+    material the user has already worked on. Reading the original frames
+    there would report flashing that no longer exists in the export and that
+    this section cannot remove, so the neighbour's edited frames stand in.
+    Returns (frames, times) on the neighbour's own edited timeline, or None
+    if it is not prepared.
+    """
+    if not sec.get("prepared") or not sec.get("cache_npy") or not sec.get("pts"):
+        return None
+    if not os.path.exists(sec["cache_npy"]):
+        return None
+    seq = edited_sequence(sec["pts"], sec.get("edits"), ext_s)
+    if not seq:
+        return None
+    if side == "lead":
+        want = [(t, src) for t, src in seq if t > seq[-1][0] - seconds]
+    else:
+        want = [(t, src) for t, src in seq if t < seq[0][0] + seconds]
+    if not want:
+        return None
+    return (_take_frames(sec["cache_npy"], [src for _, src in want]),
+            [t for t, _ in want])
+
+
+def _compose(project, sid, src, sec_start, t_lo, t_hi, need, ext_s, side,
+             notes):
+    """Lay out the material between source times `t_lo` and `t_hi` the way the
+    export will contain it: cached original frames where no section covers
+    them, and each covering section's edited frames where one does.
+
+    `src` is (frames, times) of the cached original run-up/run-out, times
+    relative to `sec_start`. Returns a list of (frames, times) runs in order.
+    """
+    others = _sections_in(project, sid, t_lo, t_hi)
+    frames, times = src if src else ([], [])
+    parts = []
+
+    def original(lo, hi):
+        seg = [(f, t) for f, t in zip(frames, times)
+               if lo - 1e-6 <= t + sec_start < hi - 1e-6]
+        if seg:
+            parts.append(([f for f, _ in seg], [t for _, t in seg]))
+
+    cursor = t_lo
+    for o in others:
+        original(cursor, o["start"])
+        edge = _edited_edge(project, o, need, side, ext_s)
+        if edge:
+            parts.append(edge)
+        else:
+            original(max(cursor, o["start"]), min(t_hi, o["end"]))
+            where = "run-up" if side == "lead" else "run-out"
+            notes.append(
+                f"Section #{o['id']} lies within this one's {where} but is "
+                "not prepared, so this check reads its original frames "
+                "— edits made there are not reflected here.")
+        cursor = max(cursor, o["end"])
+    original(cursor, t_hi)
+    return parts
+
+
+def _join(parts, dt):
+    """Lay runs of time-stamped frames end to end on one timeline, each
+    starting `dt` after the one before. Returns (frames, times) with the
+    first frame at time 0."""
+    frames, times = [], []
+    cursor = 0.0
+    for fr, ts in parts:
+        if not len(fr):
+            continue
+        base = ts[0]
+        for f, t in zip(fr, ts):
+            frames.append(f)
+            times.append(cursor + (t - base))
+        cursor = times[-1] + dt
+    return frames, times
+
+
+def section_context(project, sid, ext_s=None):
+    """Build the run-up and run-out for a section's safety check.
+
+    The frames come from the cache `prepare_section` laid down, except where
+    they fall inside another section, which contributes its edited frames
+    instead (see _edited_edge) -- what the check has to reason about is the
+    exported video, not the original.
+    """
+    sec = project.section(sid)
+    cfg = project.detector_config
+    if ext_s is None:
+        ext_s = project.render_config.extension_seconds
+    need = context_seconds(cfg)
+    notes = []
+    ctx = sec.get("context")
+    lead_src = tail_src = None
+    if isinstance(ctx, dict) and ctx.get("npy") and os.path.exists(ctx["npy"]):
+        n_lead = int(ctx.get("lead_n") or 0)
+        n_tail = int(ctx.get("tail_n") or 0)
+        if _npy_len(ctx["npy"]) >= n_lead + n_tail:
+            if n_lead:
+                lead_src = (_take_frames(ctx["npy"], range(n_lead)),
+                            list(ctx.get("lead_pts") or []))
+            if n_tail:
+                tail_src = (_take_frames(ctx["npy"],
+                                         range(n_lead, n_lead + n_tail)),
+                            list(ctx.get("tail_pts") or []))
+    elif isinstance(ctx, dict) and not ctx.get("npy"):
+        pass        # nothing to cache: the section spans the whole video
+    else:
+        # no cache at all -- prepared by a version that did not keep one, or
+        # the file has gone from the work folder
+        notes.append(
+            "This section has no cached run-up, so its check starts cold at "
+            "its first frame and cannot see flashing in its opening second "
+            "— that is the flashing a verify of the whole export finds "
+            "inside a section that checked out safe. Prepare it again for a "
+            "full check.")
+        ctx = ctx if isinstance(ctx, dict) else {}
+    if ctx and (ctx.get("seconds") or 0) + 1e-6 < need:
+        notes.append(
+            "The detection profile now needs a longer run-up than this "
+            "section was prepared with; prepare it again so its check sees "
+            "everything a pass over the whole export sees.")
+
+    dt = _median_dt(sec.get("pts") or [])
+    ts_min, ts_max = project.bounds
+
+    lead_parts = _compose(project, sid, lead_src, sec["start"],
+                          max(ts_min, sec["start"] - need), sec["start"],
+                          need, ext_s, "lead", notes)
+    lead, lead_t = _join(lead_parts, dt)
+    if lead:
+        lead_t = [t - (lead_t[-1] + dt) for t in lead_t]   # ends before 0
+
+    tail_parts = _compose(project, sid, tail_src, sec["start"],
+                          sec["end"], min(ts_max, sec["end"] + need),
+                          need, ext_s, "tail", notes)
+    tail, tail_t = _join(tail_parts, dt)
+    tail_t = [t + dt for t in tail_t]                      # starts after 0
+
+    # where the next section begins inside the run-out. Flashing from there
+    # on is that section's to fix; before it the material is untouched by
+    # any section, so flashing the edits push out there is this one's.
+    nxt = _sections_in(project, sid, sec["end"], sec["end"] + need)
+    next_at = (nxt[0]["start"] - sec["end"]) if nxt else None
+    return SectionContext(lead, lead_t, tail, tail_t, notes, next_at)
+
+
+def edited_sequence(rel_pts, edits, extension_seconds=1.0):
+    """The section's edited timeline as [(display_time, source_ordinal)].
+
+    Removed frames are backfilled from the last kept frame and extended ones
+    push everything after them later, exactly as render.py lays them out, so
+    this is the frame order the exported file will actually contain.
+    """
     ed = _parse_edits(edits)
     n = len(rel_pts)
     # if the section starts with removed frames, they are backfilled from the
@@ -289,6 +563,7 @@ def simulate_edits(frames, rel_pts, edits, cfg, aw, ah,
                       0)
     last_kept = first_kept
     offset = 0.0
+    out = []
     for i in range(n):
         removed, extended = ed.get(i, (False, False))
         if removed:
@@ -296,11 +571,39 @@ def simulate_edits(frames, rel_pts, edits, cfg, aw, ah,
         else:
             src = i
             last_kept = i
-        det.feed(rel_pts[i] + offset, np.ascontiguousarray(frames[src]))
+        out.append((rel_pts[i] + offset, src))
         if extended and not removed:
             # frame held still for extension_seconds: no transitions occur,
             # but everything after shifts later in time
             offset += extension_seconds
+    return out
+
+
+def simulate_edits(frames, rel_pts, edits, cfg, aw, ah,
+                   extension_seconds=1.0, context=None):
+    """Run the detector over the *edited* frame sequence without rendering.
+
+    `context` (from section_context) supplies the real footage either side of
+    the section. Without it the detector starts cold at the section's first
+    frame and is blind for its first second or so -- it takes a second's
+    worth of flashes to know the rate has been exceeded -- so flashing left
+    at the head of a section passes this check and then shows up in a pass
+    over the whole export, which arrives there already warmed up. Feeding the
+    run-up first puts the detector in the state the whole-video pass would
+    hand over in; feeding the run-out afterwards catches flashing the edit
+    pushes just past the section's end.
+    """
+    det = FlashDetector(cfg, aw, ah)
+    seq = edited_sequence(rel_pts, edits, extension_seconds)
+    if context:
+        for t, fr in zip(context.lead_pts, context.lead):
+            det.feed(t, np.ascontiguousarray(fr))
+    for t, src in seq:
+        det.feed(t, np.ascontiguousarray(frames[src]))
+    if context:
+        end = seq[-1][0] if seq else 0.0
+        for t, fr in zip(context.tail_pts, context.tail):
+            det.feed(end + t, np.ascontiguousarray(fr))
     return det.finish()
 
 
@@ -315,12 +618,18 @@ def _region_metric(frames, idxs, bbox):
 
 def _violation_spans(result, pad=0.3):
     """Time spans the suggester should work on: WCAG failures always, plus
-    extended flashes when the active profile flags them."""
+    extended flashes when the active profile flags them.
+
+    Spans run from each violation's onset, not the frame where the rate was
+    first exceeded -- the flashes that add up to a failure begin up to a
+    second earlier, and removing only the frames from the announcement
+    onwards leaves the run-in that caused it.
+    """
     spans = []
     for v in result.violations:
         if v.kind == "extended" and not result.flag_extended:
             continue
-        spans.append([v.start - pad, v.end + pad])
+        spans.append([min(v.onset, v.start) - pad, v.end + pad])
     spans.sort()
     merged = []
     for s, e in spans:
@@ -374,7 +683,20 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
 
     prog(0.05, "analyzing section")
     ext_s = project.render_config.extension_seconds
-    base = simulate_edits(frames, rel_pts, base_edits, cfg, aw, ah, ext_s)
+    # the proposal has to satisfy the same context-aware test check_section
+    # applies, or it would "pass" only because the detector started cold
+    ctx = section_context(project, sid, ext_s)
+
+    def sim(ed):
+        r = simulate_edits(frames, rel_pts, ed, cfg, aw, ah, ext_s,
+                           context=ctx)
+        seq = edited_sequence(rel_pts, ed, ext_s)
+        inside, after, _, _ = _classify(r, seq[-1][0] if seq else 0.0,
+                                        ctx.next_at)
+        r.violations = inside + after
+        return r
+
+    base = sim(base_edits)
     if base.safe:
         return {"edits": {}, "safe": True, "rounds": 0,
                 "note": "Already passes — nothing to remove."}
@@ -441,7 +763,7 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
         edits = dict(base_edits)
         edits.update({str(i): {"removed": True, "extended": False}
                       for i in removed})
-        result = simulate_edits(frames, rel_pts, edits, cfg, aw, ah, ext_s)
+        result = sim(edits)
         if result.safe:
             note = f"Passes after removing {len(removed)} frames."
             break
@@ -460,10 +782,82 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
     }
 
 
+def analyze_rendered_section(project, sid, path):
+    """Detector pass over a rendered section file, with the same run-up and
+    run-out its fast check uses.
+
+    Without them this reads the file cold and repeats the fast check's old
+    blind spot at a higher cost: a rendered section can be pronounced safe
+    and still be flashing in its opening second, which only shows up when the
+    whole export is verified.
+    """
+    cfg = project.detector_config
+    info = project.data["info"]
+    aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
+    ctx = section_context(project, sid)
+    det = FlashDetector(cfg, aw, ah)
+    for t, fr in zip(ctx.lead_pts, ctx.lead):
+        det.feed(t, np.ascontiguousarray(fr))
+    end = 0.0
+    dt = _median_dt(project.section(sid).get("pts") or [])
+    for t, fr in ffio.iter_frames(path, aw, ah):
+        det.feed(t, fr)
+        end = t
+    for t, fr in zip(ctx.tail_pts, ctx.tail):
+        det.feed(end + t, np.ascontiguousarray(fr))
+    result = det.finish()
+    inside, after, _, _ = _classify(result, end + dt * 0.5, ctx.next_at)
+    result.violations = inside + after
+    return result, after
+
+
+def _classify(result, end_disp, next_at=None):
+    """Split a context-aware simulation's violations by where they land.
+
+    Anything finished before the section's first frame belongs to earlier
+    material and is only there to warm the detector up. Anything whose
+    flashing starts after its last frame is in the run-out: the section
+    cannot edit it, but the user still needs to know, because it is flashing
+    the export will contain and this section's own edits may have caused it.
+    Run-out flashing inside the *next* section is that section's to fix, so
+    it is handed back as `elsewhere` and left out of this verdict.
+
+    Which side of the boundary a violation falls on is decided by `start`
+    and `end` -- where the flashing actually is -- never by `onset`. Onset
+    reaches deliberately backwards, up to a failure window before the
+    flashing is announced, so that a section can be padded far enough to
+    contain the frames that feed it. Letting it decide ownership instead
+    blames a section for flashing that begins after its last frame merely
+    because the reach crosses the boundary, and then offers its final
+    frames as the ones to remove -- frames that have nothing to do with it.
+    """
+    inside, after, elsewhere, before = [], [], [], []
+    for v in result.violations:
+        if v.kind == "extended" and not result.flag_extended:
+            continue
+        if v.end < -1e-6:
+            before.append(v)
+        elif v.start > end_disp + 1e-6:
+            (elsewhere
+             if next_at is not None and v.start >= end_disp + next_at - 1e-6
+             else after).append(v)
+        else:
+            inside.append(v)
+    return inside, after, elsewhere, before
+
+
 def check_section(project, sid, edits=None):
     """Fast safety verdict for the current (or given) edits. The verdict
     includes `flagged_frames`: the ordinals inside failing windows, so the UI
-    can highlight where the remaining problems are."""
+    can highlight where the remaining problems are.
+
+    The simulation is fed the real footage either side of the section (see
+    section_context), so it reaches the section's first frame in the state a
+    pass over the whole export arrives in and carries the section's edits on
+    past its last frame. Violations that fall wholly in the run-up are the
+    warm-up's own and are dropped; ones in the run-out are reported
+    separately as `after`, since they are real but not editable here.
+    """
     sec = project.section(sid)
     cfg = project.detector_config
     info = project.data["info"]
@@ -471,31 +865,43 @@ def check_section(project, sid, edits=None):
     aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
     frames = load_cache(project, sid)
     use_edits = edits if edits is not None else sec["edits"]
-    result = simulate_edits(frames, sec["pts"], use_edits, cfg, aw, ah, ext_s)
+    ctx = section_context(project, sid, ext_s)
+    result = simulate_edits(frames, sec["pts"], use_edits, cfg, aw, ah, ext_s,
+                            context=ctx)
+
+    seq = edited_sequence(sec["pts"], use_edits, ext_s)
+    end_disp = seq[-1][0] if seq else 0.0
+    inside, after, elsewhere, _ = _classify(result, end_disp, ctx.next_at)
+    result.violations = inside + after
+
     verdict = result.to_dict()
     # record the settings behind the verdict, so a later profile change can be
     # told from a verdict that still describes the project as it stands
     verdict["profile"] = profile_name(project.data["detector"])
     verdict["detector_sig"] = detector_signature(project.data["detector"])
+    verdict["after"] = [asdict(v) for v in after]
+    verdict["elsewhere"] = [asdict(v) for v in elsewhere]
+    verdict["context_seconds"] = context_seconds(cfg)
+    verdict["context_notes"] = list(ctx.notes)
+    verdict["context_lead"] = (round(-ctx.lead_pts[0], 3)
+                               if ctx.lead_pts else 0.0)
+    verdict["context_tail"] = (round(ctx.tail_pts[-1], 3)
+                               if ctx.tail_pts else 0.0)
 
     # map violation windows back to frame ordinals via the simulated
     # display timeline (extensions shift everything after them)
-    ed = _parse_edits(use_edits)
-    disp = []
-    off = 0.0
-    for i, t in enumerate(sec["pts"]):
-        disp.append(t + off)
-        removed, extended = ed.get(i, (False, False))
-        if extended and not removed:
-            off += ext_s
+    disp = [t for t, _ in seq]
     flagged = set()
-    for v in result.violations:
-        if v.kind == "extended" and not result.flag_extended:
-            continue
+    for v in inside:
+        lo = min(v.onset, v.start)
         for i, t in enumerate(disp):
-            if v.start - 0.05 <= t <= v.end + 0.05:
+            if lo - 0.05 <= t <= v.end + 0.05:
                 flagged.add(i)
     verdict["flagged_frames"] = sorted(flagged)
+    # a violation that carries on past the section's last frame cannot be
+    # cleared from inside it; say so rather than leaving the user to work out
+    # why the frames on offer make no difference
+    verdict["spills"] = [asdict(v) for v in inside if v.end > end_disp + 1e-6]
 
     with project.lock:
         sec["check"] = verdict

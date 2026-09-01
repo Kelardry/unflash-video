@@ -19,12 +19,13 @@ import json
 import os
 import subprocess
 import threading
+from dataclasses import asdict
 
 import numpy as np
 
 from . import ffio
 from .analysis import analyze_file
-from .editing import cache_shift
+from .editing import analyze_rendered_section, cache_shift
 from .ffio import FFMPEG, FFError, CREATE_NO_WINDOW
 
 # Every part handed to the concat demuxer must share one mp4 timescale. With
@@ -344,11 +345,11 @@ def render_section(project, sid, source, out_path, job=None,
     verdict = None
     if analyze_after:
         prog(0.92, "verifying rendered output")
-        cfg = project.detector_config
-        res = analyze_file(out_path, cfg)
+        res, after = analyze_rendered_section(project, sid, out_path)
         verdict = res.to_dict()
         verdict["profile"] = _profile_name(project)
         verdict["detector_sig"] = _detector_sig(project)
+        verdict["after"] = [asdict(v) for v in after]
 
     entry = {"path": out_path, "verdict": verdict, "warning": warn,
              "source": source, "grid_fps": grid,

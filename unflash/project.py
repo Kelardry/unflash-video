@@ -365,6 +365,16 @@ class Project:
                     sec[key] = None
                     lost.append(label)
 
+            ctx = sec.get("context")
+            if isinstance(ctx, dict) and ctx.get("npy"):
+                new_ctx = here(ctx["npy"], "context_frames.npy")
+                if os.path.isfile(new_ctx):
+                    ctx["npy"] = new_ctx
+                else:
+                    # not fatal: the check falls back to a cold start and
+                    # says so, and preparing again restores it
+                    sec["context"] = None
+
             if not sec.get("cache_npy") and sec.get("prepared"):
                 # editing needs the cached frames; offer preparation again
                 sec["prepared"] = False
@@ -502,6 +512,8 @@ class Project:
                 "proxy": None,
                 "thumbs": None,
                 "cache_npy": None,
+                "context": None,       # cached run-up/run-out frames for the
+                                       # safety check (see editing.py)
                 "edits": {},           # ordinal(str) -> {"removed": b, "extended": b}
                 "analysis": None,      # original-section analysis summary
                 "check": None,         # last simulate verdict
@@ -604,6 +616,7 @@ class Project:
                     "proxy": None,
                     "thumbs": None,
                     "cache_npy": None,
+                    "context": None,
                     "edits": {},
                     "analysis": None,
                     "check": None,
@@ -662,7 +675,9 @@ class Project:
 
     def remove_section(self, sid):
         with self.lock:
-            self.data["sections"].pop(str(sid), None)
+            gone = self.data["sections"].pop(str(sid), None)
+            if gone:
+                self._stale_neighbour_checks(gone)
             self.save()
 
     def update_section_bounds(self, sid, start, end, snap=True):
@@ -681,12 +696,17 @@ class Project:
                 end = max(lo, min(float(end), hi))
             if end <= start:
                 raise ValueError("Section end must be after start")
+            was = (sec["start"], sec["end"])
             sec["start"] = round(float(start), 6)
             sec["end"] = round(float(end), 6)
             sec.update({"prepared": False, "n_frames": 0, "pts": [],
                         "proxy": None, "thumbs": None, "cache_npy": None,
-                        "edits": {}, "analysis": None, "check": None,
-                        "preview": None, "render": None})
+                        "context": None, "edits": {}, "analysis": None,
+                        "check": None, "preview": None, "render": None})
+            # the range moved, so neighbours' run-up/run-out reads of it are
+            # stale around both the old bounds and the new ones
+            self._stale_neighbour_checks(sec, was)
+            self._stale_neighbour_checks(sec)
             self.save()
             return sec
 
@@ -763,5 +783,26 @@ class Project:
                                           "extended": extended}
             sec["edits"] = clean
             sec["check"] = None    # edits changed; old verdict is stale
+            self._stale_neighbour_checks(sec)
             self.save()
             return clean
+
+    def _stale_neighbour_checks(self, sec, span=None):
+        """Drop the check verdicts of sections close enough to `span` (the
+        changed section's range, its own by default) to have read its frames.
+
+        A section's safety check runs over the footage on either side of it,
+        and where that footage falls inside another section it is that
+        section's *edited* frames (see editing.section_context). So changing
+        one section's edits can change what its neighbours' checks would say,
+        and a verdict recorded before the change no longer describes the
+        project. Clearing it shows them as unchecked rather than leaving a
+        stale tick behind."""
+        from .analysis import context_seconds
+        need = context_seconds(self.detector_config)
+        lo, hi = span if span else (sec["start"], sec["end"])
+        for other in self.data["sections"].values():
+            if other is sec or not other.get("check"):
+                continue
+            if other["start"] - need < hi and other["end"] + need > lo:
+                other["check"] = None

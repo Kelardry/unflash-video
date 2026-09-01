@@ -334,6 +334,28 @@ function splitViolations(res) {
   };
 }
 
+// Where to look for a violation. The reported span runs from the first flash
+// that feeds the failure to the last frame still over the rate, and a long
+// passage of flashing merges into one span — so the span alone can be a
+// minute of video with no hint where inside it to look. `peak` is the worst
+// moment in it; quoting a couple of seconds around that is what you can
+// actually go and watch.
+function violationWhere(v) {
+  const from = Math.min(v.onset ?? v.start, v.start);
+  const span = `${fmtTime(from)}–${fmtTime(v.end)}`;
+  const peak = v.peak ?? v.start;
+  if (v.end - from <= 2.5) return span;
+  return `${span}, worst around ${fmtTime(Math.max(from, peak - 0.5))}`
+    + `–${fmtTime(Math.min(v.end, peak + 1.0))}`;
+}
+
+// The section whose range covers a moment, if any — a verify failure is much
+// easier to act on when it says which section to reopen.
+function sectionAt(t) {
+  const secs = Object.values((state.project || {}).sections || {});
+  return secs.find((s) => t >= s.start - 0.001 && t <= s.end + 0.001);
+}
+
 // "2 WCAG violation window(s) + 1 extended flash" — extended flashes are only
 // mentioned when the active profile flags them (otherwise none are reported).
 function violationPhrase(res) {
@@ -465,6 +487,12 @@ function renderSectionList() {
     else if (s.render_safe === false) badges.push('<span class="badge bad">rendered ✗</span>');
     // a recovered render carries no verdict: rendered, but never checked
     else if (s.has_render) badges.push('<span class="badge neutral">rendered, unchecked</span>');
+    // flashing the section's edits leave just past its own end: real in the
+    // export, but no frame of this section can remove it
+    if (s.check_after || s.check_spills)
+      badges.push(`<span class="badge warn" title="A failure reaches past this section's last frame — extend it, or edit the section after it">runs past end ⚠</span>`);
+    if ((s.check_context_notes || []).length)
+      badges.push('<span class="badge warn" title="Its check ran without the run-up frames, so it cannot see flashing in its opening second">prepare again ⚠</span>');
     if ((s.warnings || []).length) badges.push('<span class="badge warn">⚠ notes</span>');
     el.innerHTML = `<div class="times">#${s.id} · ${fmtTime(s.start)} – ${fmtTime(s.end)}</div>
       <div class="meta">${badges.join("")}</div>`;
@@ -1117,11 +1145,30 @@ $("btnCheck").onclick = () => {
       if (!res.safe && res.wcag_safe) {
         msg += " (No WCAG failure left — what remains is extended flashing.)";
       }
-      toast(msg, !res.safe);
+      // flashing the edits leave in the run-out: real in the export, but past
+      // this section's last frame, so nothing here can remove it
+      const after = res.after || [];
+      if (after.length) {
+        msg += ` Also flashing just past the end of this section (`
+          + after.map(violationWhere).join(", ")
+          + `) — extend this section past it, or add one there.`;
+      }
+      // a failure that starts inside the section but carries on past its last
+      // frame: the frames on offer here may not be enough on their own
+      const spills = res.spills || [];
+      if (spills.length) {
+        msg += ` One or more of these carry on past the section's last frame (`
+          + spills.map(violationWhere).join(", ")
+          + `); if removing the frames offered does not clear it, extend the `
+          + `section end or edit the following one.`;
+      }
+      for (const note of (res.context_notes || [])) msg += " " + note;
+      toast(msg, !res.safe || after.length > 0);
       refreshBadges();
     }))
     .catch((e) => toast(e.message, true));
 };
+
 
 $("btnPreview").onclick = () => {
   const sid = state.sectionId;
@@ -1231,11 +1278,30 @@ $("btnVerifyExport").onclick = async () => {
       if (res.safe) {
         txt = `✓ Exported file passes the detector (profile: ${res.profile}).`;
       } else {
-        txt = `✗ Exported file still fails (profile: ${res.profile}): `
-          + shown.map((x) => `${kindLabel(x.kind)} ${fmtTime(x.start)}–${fmtTime(x.end)}`).join(", ");
+        const covered = (x) => sectionAt(x.peak ?? x.start)
+          || sectionAt(Math.min(x.onset ?? x.start, x.start));
+        const rows = shown.map((x) => {
+          const sec = covered(x);
+          const where = sec ? `in section #${sec.id}`
+                            : "in material no section covers";
+          return `  • ${kindLabel(x.kind)} ${violationWhere(x)} — ${where}`;
+        });
+        txt = `✗ Exported file still fails (profile: ${res.profile}):\n`
+          + rows.join("\n");
+        if (shown.some((x) => !covered(x))) {
+          txt += "\nTimes no section covers need one: add a section over "
+            + "them, prepare it, edit it, then re-render and re-export.";
+        }
+        if (shown.some(covered)) {
+          txt += "\nTimes inside a section: reopen it and check it again. "
+            + "If its check disagrees with this, prepare it again first "
+            + "— a section prepared by an older version has no run-up "
+            + "frames cached, and without them its check cannot see flashing "
+            + "in its opening second.";
+        }
         if (res.wcag_safe) {
-          txt += "\nThese pass WCAG but are extended flashes — add or open the "
-            + "sections covering those times, edit them, then re-render and re-export.";
+          txt += "\nThese pass WCAG but are extended flashes — "
+            + "hazardous for some viewers under this profile.";
         }
       }
       $("exportResult").textContent = txt;

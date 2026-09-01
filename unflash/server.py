@@ -336,6 +336,13 @@ def _section_summary(s):
     out["preview_safe"] = (pv.get("verdict") or {}).get("safe")
     out["render_safe"] = (rv.get("verdict") or {}).get("safe")
     out["render_stale"] = Project.render_stale(s)
+    chk = s.get("check") or {}
+    # flashing the section's edits leave in the material just after it: real,
+    # in the export, but not editable from here
+    out["check_after"] = len(chk.get("after") or [])
+    # failures that start inside the section but run past its last frame
+    out["check_spills"] = len(chk.get("spills") or [])
+    out["check_context_notes"] = chk.get("context_notes") or []
     return out
 
 
@@ -384,7 +391,8 @@ def scan():
                 "anomalies": res.anomalies,
                 "violations": [
                     {"start": v.start, "end": v.end, "kind": v.kind,
-                     "count": v.count} for v in res.violations],
+                     "count": v.count, "onset": v.onset, "peak": v.peak}
+                    for v in res.violations],
                 "timeline": timeline_summary(res, bounds),
                 "suggested_sections": sections,
             }

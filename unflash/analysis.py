@@ -64,6 +64,20 @@ class Violation:
     end: float
     kind: str              # "flash" | "red" | "extended"
     count: float = 0.0     # flashes in the window (or coverage for extended)
+    onset: float = None    # first frame whose flashing feeds this failure
+    peak: float = None     # worst moment inside it (highest count/coverage)
+
+    def __post_init__(self):
+        # a violation is *reported* at `start`, the frame where the failure
+        # rate is first exceeded -- but the flashes that add up to it began
+        # up to a failure window earlier. `onset` is where the hazard really
+        # begins, and it is what sectioning has to pad from: a section that
+        # starts after `onset` cannot contain the frames responsible for its
+        # own violation, so editing it can never remove one.
+        if self.onset is None:
+            self.onset = self.start
+        if self.peak is None:
+            self.peak = self.start
 
     @property
     def wcag(self):
@@ -245,6 +259,11 @@ class _FlashCounter:
     def __init__(self, shape, limit):
         self.K = int(np.floor(limit)) + 1
         self.ring = np.full((self.K,) + shape, -1e12, np.float32)
+        # when each of those flashes *opened* -- a flash is timed by its
+        # closing transition, but the pair starts at the opening one, and
+        # that earlier moment is what has to be inside a work section for
+        # the section's edits to be able to remove the flash.
+        self.ring_open = np.full((self.K,) + shape, -1e12, np.float32)
         self.last = np.full(shape, -1e12, np.float32)   # most recent flash
         self.pend_pol = np.zeros(shape, np.int8)
         self.pend_t = np.full(shape, -1e12, np.float32)
@@ -258,12 +277,26 @@ class _FlashCounter:
             sub = np.roll(self.ring[:, flash], 1, axis=0)
             sub[0] = tc
             self.ring[:, flash] = sub
+            subo = np.roll(self.ring_open[:, flash], 1, axis=0)
+            subo[0] = self.pend_t[flash]     # read before it is cleared
+            self.ring_open[:, flash] = subo
             self.last[flash] = tc
             self.pend_pol[flash] = 0
             self.pend_t[flash] = -1e12
         if rest.any():
             self.pend_pol[rest] = pol
             self.pend_t[rest] = tc
+
+    def window_onset(self, strobing, y0, y1, x0, x1, rate=None):
+        """Earliest opening transition still inside the failure window, over
+        the strobing pixels of one window position (internal clock)."""
+        k = self.K if rate is None else max(1, min(self.K, int(rate)))
+        sel = strobing[y0:y1, x0:x1]
+        if not sel.any():
+            return None
+        vals = self.ring_open[k - 1, y0:y1, x0:x1][sel]
+        vals = vals[vals > -1e11]
+        return float(vals.min()) if vals.size else None
 
     def strobing(self, tc, fresh_window, rate=None):
         """Pixels flashing at least `rate` times a second AND flashed just now.
@@ -338,6 +371,10 @@ class FlashDetector:
         self.stat_ext = array("i")       # area strobing at the permitted
                                          # rate (extended flash)
         self.stat_ext_red = array("i")
+        # internal-clock time of the earliest transition still feeding the
+        # failure window on this frame (0 when the frame is not strobing)
+        self.stat_haz_onset = array("d")
+        self.stat_haz_red_onset = array("d")
         self.n = 0
         self.anomalies = 0
         self._last_native = None
@@ -416,6 +453,7 @@ class FlashDetector:
         # --- flashes: per-pixel rate + concurrent area + coherent mean ------
         haz = haz_red = 0
         ext_g = ext_r = 0
+        haz_onset = haz_red_onset = tc
         fresh_w = cfg.area_accum_window
         for counter, mflash, kind in (
                 (self.flash_gen, self.mflash_gen, "general"),
@@ -425,6 +463,7 @@ class FlashDetector:
             for q, pol in masks:
                 counter.transitions(q, pol, tc)
             best = 0
+            best_onset = tc
             strobe = counter.strobing(tc, fresh_w)
             if strobe.any():
                 counts = self._window_sums(strobe)
@@ -437,6 +476,14 @@ class FlashDetector:
                     bbox = (int(self.gxs[gx]), int(self.gys[gy]),
                             int(self.gxs[gx] + self.ww),
                             int(self.gys[gy] + self.wh))
+                    onset = counter.window_onset(strobe, bbox[1], bbox[3],
+                                                 bbox[0], bbox[2])
+                    if onset is not None:
+                        # the opening transition itself ramps over a few
+                        # frames, and completions are pooled, so back off by
+                        # the pooling window to reach the frame the swing
+                        # actually started from
+                        best_onset = onset - cfg.area_accum_window
                     if (not self._above[kind]
                             or tc - self._last_event_tc[kind] >= 0.25):
                         self.events.append(
@@ -458,9 +505,9 @@ class FlashDetector:
                 if ecoh.any():
                     ext_best = int(np.where(ecoh, ecounts, 0).max())
             if kind == "general":
-                haz, ext_g = best, ext_best
+                haz, ext_g, haz_onset = best, ext_best, best_onset
             else:
-                haz_red, ext_r = best, ext_best
+                haz_red, ext_r, haz_red_onset = best, ext_best, best_onset
 
         # pooled transition areas: chart statistics only
         self.pool_gen.add(q_up, 1, tc)
@@ -485,6 +532,8 @@ class FlashDetector:
         self.stat_haz_red.append(haz_red)
         self.stat_ext.append(ext_g)
         self.stat_ext_red.append(ext_r)
+        self.stat_haz_onset.append(haz_onset)
+        self.stat_haz_red_onset.append(haz_red_onset)
         self.n += 1
 
     def finish(self) -> AnalysisResult:
@@ -504,28 +553,48 @@ class FlashDetector:
             "hazard_red": self.stat_haz_red,
         }
         res.flag_extended = cfg.flag_extended
-        res.violations += self._strobe_violations(self.stat_haz, "flash")
-        res.violations += self._strobe_violations(self.stat_haz_red, "red")
+        res.violations += self._strobe_violations(
+            self.stat_haz, self.stat_haz_onset, "flash")
+        res.violations += self._strobe_violations(
+            self.stat_haz_red, self.stat_haz_red_onset, "red")
         res.violations += self._extended_violations()
         res.violations.sort(key=lambda v: v.start)
         return res
 
-    def _strobe_violations(self, areas, kind):
+    def _to_native(self, tcs):
+        """Internal-clock times -> the native pts of the frames they fell on.
+
+        The two clocks only differ where the source's timestamps jump, but
+        everything downstream (sectioning, seeking, cutting) speaks native
+        pts, so onsets measured on the monotonic clock have to come back.
+        Vectorized over a whole array: a long video has tens of thousands of
+        strobing frames and rebuilding the clock per frame is quadratic."""
+        if self.n == 0:
+            return np.zeros(len(tcs))
+        return np.interp(tcs, np.asarray(self.stat_tc),
+                         np.asarray(self.stat_t))
+
+    def _strobe_violations(self, areas, onsets, kind):
         """Frames where concurrently-strobing pixels cover the area
         threshold, merged into intervals (native time)."""
         out = []
         cur = None
         cur_end_tc = None
+        native_onsets = self._to_native(np.asarray(onsets))
         for i in range(self.n):
             if areas[i] < self.area_thresh:
                 continue
             t, tc = self.stat_t[i], self.stat_tc[i]
             sev = round(areas[i] / self.area_thresh, 2)
+            ons = min(t, float(native_onsets[i]))
             if cur is not None and tc - cur_end_tc <= 1.0:
                 cur.end = max(cur.end, t)
-                cur.count = max(cur.count, sev)
+                if sev > cur.count:
+                    cur.count = sev
+                    cur.peak = t
+                cur.onset = min(cur.onset, ons)
             else:
-                cur = Violation(t, t, kind, sev)
+                cur = Violation(t, t, kind, sev, onset=ons, peak=t)
                 out.append(cur)
             cur_end_tc = tc
         return out
@@ -570,12 +639,25 @@ class FlashDetector:
                 continue
             cov = flashy[i:j].mean()
             if cov >= cfg.extended_coverage:
-                s, e = float(t[i]), float(t[j - 1])
+                # report the flashing, not the window that measured it. The
+                # window slides, so it can open up to extended_window before
+                # the first flashing frame and close after the last; a span
+                # that wide reads as a hazard where there is none, and a
+                # section only overlapping that padding gets blamed for
+                # flashing that is entirely somebody else's.
+                lit = np.nonzero(flashy[i:j])[0]
+                if not lit.size:
+                    continue
+                s = float(t[i + lit[0]])
+                e = float(t[i + lit[-1]])
                 if cur and s <= cur.end:
                     cur.end = max(cur.end, e)
-                    cur.count = max(cur.count, float(cov))
+                    if float(cov) > cur.count:
+                        cur.count = float(cov)
+                        cur.peak = s
                 else:
-                    cur = Violation(s, e, "extended", float(cov))
+                    cur = Violation(s, e, "extended", float(cov),
+                                    onset=s, peak=s)
                     out.append(cur)
         return out
 
@@ -638,9 +720,40 @@ def analyze_file(path, cfg, start=None, duration=None, progress=None,
                           total_hint=total, cancel=cancel)
 
 
+def context_seconds(cfg) -> float:
+    """How much of the run-up a detector has to have seen before its verdict
+    at a given moment matches the verdict a pass over the whole video gives
+    at that same moment.
+
+    Everything the detector carries forward is bounded: a flash pairs two
+    transitions at most 1 s apart, the failure test looks back over 1 s of
+    flashes, and the per-pixel extrema trackers need one reversal to settle.
+    Feed it that much real footage first and its state at the hand-over is
+    the state a full pass would have arrived with -- start it cold instead
+    and it is simply blind for that long, which is why a section that its own
+    check calls safe can still be flashing in its opening second.
+
+    An extended flash is measured over a whole `extended_window`, so profiles
+    that flag those need the run-up to cover one.
+    """
+    base = 1.0 + 1.0 + 0.5      # pairing + failure window + tracker settling
+    if cfg.flag_extended:
+        base = max(base, cfg.extended_window + cfg.extended_hold + 0.5)
+    return base
+
+
 def violations_to_sections(violations, cfg, bounds, keyframes=None):
     """Merge violations into padded work sections.
     `bounds` = (ts_min, ts_max): the video's real native-pts range.
+
+    Sections are padded out from each violation's `onset` -- the first
+    transition that feeds it -- not from `start`, the frame where the rate
+    was first exceeded. Those are different moments: a failure is a second's
+    worth of flashes, so it is only announced once the last of them lands,
+    and a section padded from the announcement can begin *after* some of the
+    flashes it is supposed to let you remove. Padding from the onset is what
+    makes "every section edited safe" mean "the whole video is safe"; it
+    costs about a second at the head of a section and flags nothing new.
 
     Extended flashes create sections only when the profile flags them
     (extended_mode="section"); otherwise they are not reported at all.
@@ -650,7 +763,7 @@ def violations_to_sections(violations, cfg, bounds, keyframes=None):
     for v in violations:
         if v.kind == "extended" and not cfg.flag_extended:
             continue
-        s = max(ts_min, v.start - cfg.section_pad)
+        s = max(ts_min, min(v.onset, v.start) - cfg.section_pad)
         e = min(ts_max, v.end + cfg.section_pad)
         if e - s < cfg.section_min_len:
             mid = (s + e) / 2
