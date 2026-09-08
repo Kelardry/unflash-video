@@ -412,7 +412,7 @@ def _edited_edge(project, sec, seconds, side, ext_s):
         return None
     if not os.path.exists(sec["cache_npy"]):
         return None
-    seq = edited_sequence(sec["pts"], sec.get("edits"), ext_s)
+    seq = edited_sequence(shown_pts(sec), sec.get("edits"), ext_s)
     if not seq:
         return None
     if side == "lead":
@@ -548,6 +548,47 @@ def section_context(project, sid, ext_s=None):
     return SectionContext(lead, lead_t, tail, tail_t, notes, next_at)
 
 
+def section_timeline(sec):
+    """How a section maps onto the source: (rel_pts, n_out, total, base, med).
+
+    `rel_pts` are the prepared frame times rebased onto the section's first
+    frame, which is what the render emits; `base` is how far that frame falls
+    after the section's nominal start; `n_out` is how many of them the section
+    actually shows; `total` is its exact length.
+
+    Everything that reasons about a section's own timeline comes through
+    here -- the renderer, the exporter, and the fast safety check. They have
+    to agree to the frame: the check simulating the section from its nominal
+    start while the render emits from its first decoded frame puts the two
+    a frame out of step, which is enough to move every time either of them
+    reports and to change what the run-up and run-out abut.
+    """
+    rel = [float(t) for t in (sec["pts"] or [])]
+    dur = sec["end"] - sec["start"]
+    if not rel:
+        return [], 0, dur, 0.0, 1.0 / 30
+    deltas = np.diff(rel)
+    ok = len(deltas) and (deltas > 1e-9).any()
+    med = float(np.median(deltas[deltas > 1e-9])) if ok else 1.0 / 30
+    # Frames at or past the section's end belong to the untouched span that
+    # follows it: `-t` is enforced on decode timestamps, so the decode runs a
+    # frame or so past the end, and the next span -- seeking to that same end
+    # -- opens with that very frame. Showing it in both plays it twice and
+    # starts everything after the section late.
+    n_out = sum(1 for t in rel if t < dur - 1e-9) or len(rel)
+    base = rel[0]
+    out = [t - base for t in rel]
+    total = out[n_out] if n_out < len(out) else out[-1] + med
+    return out, n_out, total, base, med
+
+
+def shown_pts(sec):
+    """The section's frame times exactly as the render emits them: rebased
+    onto its first frame, and stopping where the render stops."""
+    rel, n_out, _, _, _ = section_timeline(sec)
+    return rel[:n_out]
+
+
 def edited_sequence(rel_pts, edits, extension_seconds=1.0):
     """The section's edited timeline as [(display_time, source_ordinal)].
 
@@ -667,7 +708,7 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
     info = project.data["info"]
     aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
     frames = load_cache(project, sid)
-    rel_pts = sec["pts"]
+    rel_pts = shown_pts(sec)
     n = len(rel_pts)
     t_arr = np.asarray(rel_pts)
     only_set = set(int(i) for i in only) if only else None
@@ -866,10 +907,11 @@ def check_section(project, sid, edits=None):
     frames = load_cache(project, sid)
     use_edits = edits if edits is not None else sec["edits"]
     ctx = section_context(project, sid, ext_s)
-    result = simulate_edits(frames, sec["pts"], use_edits, cfg, aw, ah, ext_s,
+    rel_pts = shown_pts(sec)
+    result = simulate_edits(frames, rel_pts, use_edits, cfg, aw, ah, ext_s,
                             context=ctx)
 
-    seq = edited_sequence(sec["pts"], use_edits, ext_s)
+    seq = edited_sequence(rel_pts, use_edits, ext_s)
     end_disp = seq[-1][0] if seq else 0.0
     inside, after, elsewhere, _ = _classify(result, end_disp, ctx.next_at)
     result.violations = inside + after

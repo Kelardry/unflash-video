@@ -380,6 +380,8 @@ class FlashDetector:
         self._last_native = None
         self._clock = 0.0
         self._recent_dt = []
+        self._prev = None       # last picture fed, to spot held frames
+        self.held = 0           # frames that merely repeated it
 
     def _window_sums(self, arr):
         """Sum of `arr` over every grid window position -> (gy, gx) array."""
@@ -412,6 +414,40 @@ class FlashDetector:
     def feed(self, t, frame):
         cfg = self.cfg
         tc = self._advance_clock(t)
+        # A picture merely held on screen is not a fresh observation. No
+        # pixel moved, so no transition can complete and no extremum can
+        # turn: feeding it leaves every tracker exactly as it was, and the
+        # only thing it can still do is re-report the flashing of the frame
+        # it repeats, one frame-time later than that frame.
+        #
+        # That matters because held frames are not rare. Rendering re-times
+        # a section onto a constant-rate grid (see render._pick_grid_fps),
+        # repeating each source picture three or four times, so a rendered
+        # section re-reports every hazard for up to a source frame longer
+        # than the same footage does when it is checked -- which is enough
+        # for a section its own check calls safe to fail after rendering.
+        # Removals hold a frame too, and so do plenty of capture sources.
+        #
+        # The clock still advances: the picture really was on screen for
+        # that long, and the time it occupies has to count against the
+        # sustained-flashing windows like any other quiet moment.
+        if self._prev is not None and np.array_equal(frame, self._prev):
+            self.held += 1
+            self.stat_t.append(t)
+            self.stat_tc.append(tc)
+            self.stat_lum.append(self.stat_lum[-1])
+            self.stat_up.append(self.stat_up[-1])
+            self.stat_dn.append(self.stat_dn[-1])
+            self.stat_red.append(self.stat_red[-1])
+            self.stat_haz.append(0)
+            self.stat_haz_red.append(0)
+            self.stat_ext.append(0)
+            self.stat_ext_red.append(0)
+            self.stat_haz_onset.append(tc)
+            self.stat_haz_red_onset.append(tc)
+            self.n += 1
+            return
+        self._prev = frame.copy()
         lin = _LUT[frame]                       # HxWx3 float32, linear
         R, G, B = lin[..., 0], lin[..., 1], lin[..., 2]
         L = 0.2126 * R + 0.7152 * G + 0.0722 * B
@@ -601,13 +637,29 @@ class FlashDetector:
 
     def _extended_violations(self):
         """ITC/Ofcom-style extended flash: flashing that meets every failure
-        criterion except the rate — it runs at `flash_limit` per second
-        instead of above it — sustained for `extended_window` seconds.
+        criterion except the rate -- it runs at `flash_limit` per second
+        instead of above it -- sustained for `extended_window` seconds.
 
-        A frame counts as flashing while the last qualifying strobe is less
-        than `extended_hold` seconds old, so the separate strobe moments of a
-        real 3 Hz flicker join up, while a one-off transition decays after a
+        Each qualifying strobe holds the content "flashing" for
+        `extended_hold` seconds, so the separate strobe moments of a real
+        3 Hz flicker join up, while a one-off transition decays after a
         second and cannot fill a 5-second window on its own.
+
+        Both the coverage and the search over window positions are measured
+        in the time domain rather than over frames, which is what makes the
+        verdict depend on the footage and not on how densely the file
+        carrying it happens to sample it. Frames are not evenly spaced:
+        rendering re-times a section onto a constant-rate grid (see
+        render._pick_grid_fps), so a rendered section carries three or four
+        times the frames per second of the untouched material either side of
+        it, and plenty of sources -- screen and game captures especially --
+        are variable-rate to begin with. Counting frames lets the dense side
+        of a window outvote the sparse side several times over, reading
+        flashing as far more sustained than it is; sampling window positions
+        at frame times lets a dense file find peaks a sparse one steps over.
+        Either one is enough for a section its own check calls safe to fail
+        once it has been rendered, on what is frame for frame the same
+        footage.
 
         Profiles with extended_mode="off" skip this entirely, so exact-WCAG
         runs never report a hazard the WCAG verdict does not act on."""
@@ -615,51 +667,129 @@ class FlashDetector:
         if self.n == 0 or not cfg.flag_extended:
             return []
         area = self.area_thresh * cfg.extended_area_ratio
-        t = np.asarray(self.stat_t)
         tc = np.asarray(self.stat_tc)
         hit = (np.asarray(self.stat_ext) >= area) | \
             (np.asarray(self.stat_ext_red) >= area)
-        # hold each qualifying strobe for extended_hold seconds, so the test
-        # below measures "flashing kept recurring", not "flashed once"
-        flashy = np.zeros(self.n, bool)
-        last = -1e12
-        for i in range(self.n):
-            if hit[i]:
-                last = tc[i]
-            flashy[i] = (tc[i] - last) <= cfg.extended_hold
-        out = []
-        n = self.n
-        j = 0
-        cur = None
-        for i in range(n):
-            while j < n and tc[j] <= tc[i] + cfg.extended_window:
-                j += 1
-            span = j - i
-            if span < 10 or (tc[min(j, n - 1)] - tc[i]) < cfg.extended_window * 0.9:
+        if not hit.any():
+            return []
+        lo, hi = float(tc[0]), float(tc[-1])
+        lit = _merge_spans([(h, h + cfg.extended_hold) for h in tc[hit]],
+                           lo, hi)
+        if not lit:
+            return []
+        W = cfg.extended_window
+        if hi - lo >= W:
+            width, x_hi = W, hi - W
+        elif hi - lo >= W * 0.9:
+            # too short to hold a whole window: judge it on all there is,
+            # rather than on a window sliced off the end, whose shorter span
+            # would let less flashing clear the same coverage bar
+            width, x_hi = hi - lo, lo
+        else:
+            return []
+        ab = np.array([s[0] for s in lit])
+        be = np.array([s[1] for s in lit])
+        cover = _Coverage(ab, be)
+        # coverage(x) is piecewise linear in x, cornering only where a
+        # flashing span opens or where one closed a window-length earlier,
+        # so testing those corners finds every window position that can
+        # qualify -- no matter where the frames happen to fall
+        xs = np.unique(np.concatenate(([lo, x_hi], ab, be - width)))
+        xs = np.clip(xs[(xs >= lo) & (xs <= x_hi)], lo, x_hi)
+        if not xs.size:
+            return []
+        fracs = cover.inside(xs, width) / width
+        ok = fracs >= cfg.extended_coverage
+        if not ok.any():
+            return []
+
+        merged = []
+        for x, frac in zip(xs[ok], fracs[ok]):
+            # report the flashing, not the window that measured it. The
+            # window slides, so it can open a window-length before the first
+            # flashing moment and close after the last; a span that wide
+            # reads as a hazard where there is none, and a section only
+            # overlapping that padding gets blamed for flashing that is
+            # entirely somebody else's.
+            i0 = int(np.searchsorted(be, x, side="right"))
+            i1 = int(np.searchsorted(ab, x + width, side="left"))
+            if i1 <= i0:
                 continue
-            cov = flashy[i:j].mean()
-            if cov >= cfg.extended_coverage:
-                # report the flashing, not the window that measured it. The
-                # window slides, so it can open up to extended_window before
-                # the first flashing frame and close after the last; a span
-                # that wide reads as a hazard where there is none, and a
-                # section only overlapping that padding gets blamed for
-                # flashing that is entirely somebody else's.
-                lit = np.nonzero(flashy[i:j])[0]
-                if not lit.size:
-                    continue
-                s = float(t[i + lit[0]])
-                e = float(t[i + lit[-1]])
-                if cur and s <= cur.end:
-                    cur.end = max(cur.end, e)
-                    if float(cov) > cur.count:
-                        cur.count = float(cov)
-                        cur.peak = s
-                else:
-                    cur = Violation(s, e, "extended", float(cov),
-                                    onset=s, peak=s)
-                    out.append(cur)
-        return out
+            s = max(float(ab[i0]), x)
+            e = min(float(be[i1 - 1]), x + width)
+            if e <= s:
+                continue
+            if merged and s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+                merged[-1][2] = max(merged[-1][2], float(frac))
+            else:
+                merged.append([s, e, float(frac)])
+        if not merged:
+            return []
+
+        # the longest unbroken stretch of flashing inside a report is the
+        # moment worth going and watching, and it is the one thing a span
+        # covering half a minute of merged bursts cannot tell you
+        peaks = []
+        for s, e, _ in merged:
+            i0 = int(np.searchsorted(be, s, side="right"))
+            i1 = int(np.searchsorted(ab, e, side="left"))
+            runs = [(min(float(be[k]), e) - max(float(ab[k]), s),
+                     max(float(ab[k]), s)) for k in range(i0, i1)]
+            peaks.append(max(runs)[1] if runs else s)
+        starts = self._to_native(np.array([m[0] for m in merged]))
+        ends = self._to_native(np.array([m[1] for m in merged]))
+        pk = self._to_native(np.array(peaks))
+        return [Violation(float(a), float(b), "extended", m[2],
+                          onset=float(a), peak=float(p))
+                for m, a, b, p in zip(merged, starts, ends, pk)]
+
+
+def _merge_spans(spans, lo, hi):
+    """`spans` clipped to [lo, hi] and merged where they touch or overlap,
+    returned sorted and disjoint."""
+    out = []
+    for a, b in sorted(spans):
+        a, b = max(float(a), lo), min(float(b), hi)
+        if b <= a:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+class _Coverage:
+    """How many seconds of a set of disjoint spans fall inside a window.
+
+    The question is "how much of this window was flashing", and the answer
+    is a duration. A count of flashing frames stands in for it only where
+    the frames are evenly spaced, which across a render, or on any
+    variable-rate source, they are not.
+    """
+
+    def __init__(self, starts, ends):
+        self.a = np.asarray(starts, float)
+        self.b = np.asarray(ends, float)
+        self.cum = np.concatenate(([0.0], np.cumsum(self.b - self.a)))
+
+    def upto(self, y):
+        """Covered seconds before each time in `y`."""
+        y = np.asarray(y, float)
+        k = np.searchsorted(self.b, y, side="right")
+        part = np.zeros(y.shape, float)
+        inside = k < self.a.size
+        if inside.any():
+            ki = k[inside]
+            part[inside] = np.clip(y[inside] - self.a[ki], 0.0,
+                                   self.b[ki] - self.a[ki])
+        return self.cum[k] + part
+
+    def inside(self, x, width):
+        """Covered seconds in [x, x + width] for each x."""
+        x = np.asarray(x, float)
+        return self.upto(x + width) - self.upto(x)
 
 
 def _windows_over_limit(flashes, limit, kind):

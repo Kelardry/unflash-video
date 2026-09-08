@@ -349,11 +349,26 @@ function violationWhere(v) {
     + `–${fmtTime(Math.min(v.end, peak + 1.0))}`;
 }
 
-// The section whose range covers a moment, if any — a verify failure is much
-// easier to act on when it says which section to reopen.
-function sectionAt(t) {
-  const secs = Object.values((state.project || {}).sections || {});
-  return secs.find((s) => t >= s.start - 0.001 && t <= s.end + 0.001);
+// The failures themselves, not just how many of them. A section can run half
+// a minute, and "1 extended flash" leaves nowhere inside it to look; these
+// times are on the section's own timeline — the one the frame grid, the
+// player and Check Safety all use — so they can be gone to directly.
+function violationLines(res) {
+  const { wcag, ext } = splitViolations(res);
+  const shown = (res.flag_extended ? wcag.concat(ext) : wcag)
+    .slice().sort((a, b) => a.start - b.start);
+  const past = new Set((res.after || []).map((v) => v.start));
+  return shown.map((v) => `${kindLabel(v.kind)} ${violationWhere(v)}`
+    + (past.has(v.start)
+       ? " (past this section's last frame — fix it in the next section)" : ""));
+}
+
+// Verdict on a rendered section, as a sentence: the count, then where.
+function renderVerdict(head, verdict) {
+  const v = verdict || {};
+  if (v.safe) return `${head} — passes the detector ✓`;
+  return `${head} — still FAILS the detector (${violationPhrase(v)}): `
+    + violationLines(v).join("; ");
 }
 
 // "2 WCAG violation window(s) + 1 extended flash" — extended flashes are only
@@ -1175,8 +1190,7 @@ $("btnPreview").onclick = () => {
   api(`/api/section/${sid}/preview`, "POST", {})
     .then((r) => pollJob(r.job, "Rendering preview", (res) => {
       const safe = res.verdict && res.verdict.safe;
-      toast(safe ? "Preview rendered — passes the detector ✓"
-                 : `Preview rendered — still FAILS the detector (${violationPhrase(res.verdict || {})})`, !safe);
+      toast(renderVerdict("Preview rendered", res.verdict), !safe);
       api(`/api/section/${sid}`).then((d) => {
         state.section = d.section;
         setPlayerSource("preview");
@@ -1190,8 +1204,7 @@ $("btnRender").onclick = () => {
   api(`/api/section/${sid}/render`, "POST", {})
     .then((r) => pollJob(r.job, "Rendering full resolution", (res) => {
       const safe = res.verdict && res.verdict.safe;
-      let msg = safe ? "Full render complete — passes the detector ✓"
-                     : `Full render complete — still FAILS the detector (${violationPhrase(res.verdict || {})})`;
+      let msg = renderVerdict("Full render complete", res.verdict);
       if (res.warning) msg += ` (${res.warning})`;
       toast(msg, !safe);
       refreshProject(sid);
@@ -1278,26 +1291,54 @@ $("btnVerifyExport").onclick = async () => {
       if (res.safe) {
         txt = `✓ Exported file passes the detector (profile: ${res.profile}).`;
       } else {
-        const covered = (x) => sectionAt(x.peak ?? x.start)
-          || sectionAt(Math.min(x.onset ?? x.start, x.start));
+        // `where` is worked out server-side from the layout the export
+        // recorded, not by looking the time up on the source timeline: the
+        // two run apart as soon as any extension pushes the export later.
         const rows = shown.map((x) => {
-          const sec = covered(x);
-          const where = sec ? `in section #${sec.id}`
-                            : "in material no section covers";
+          const w = x.where;
+          let where;
+          if (!w) {
+            where = "somewhere this export cannot place — it was made before "
+              + "the layout was recorded, so export again to have failures "
+              + "traced back to a section";
+          } else if (w.section != null) {
+            where = `in section #${w.section}, at ${fmtTime(w.at)} on its `
+              + "own timeline";
+          } else if (w.src != null) {
+            where = `in material no section covers (${fmtTime(w.src)} of the `
+              + "source)";
+          } else {
+            where = "at a time the export's own layout does not cover";
+          }
+          // a failure can begin in one section and peak in the next;
+          // naming only where it peaks sends you to edit the wrong one
+          const from = x.where_start;
+          if (from) {
+            where += from.section != null
+              ? `, beginning in section #${from.section} at ${fmtTime(from.at)}`
+              : ", beginning in material no section covers";
+          }
           return `  • ${kindLabel(x.kind)} ${violationWhere(x)} — ${where}`;
         });
         txt = `✗ Exported file still fails (profile: ${res.profile}):\n`
           + rows.join("\n");
-        if (shown.some((x) => !covered(x))) {
+        const inSection = shown.filter((x) => x.where && x.where.section != null);
+        if (shown.some((x) => x.where && x.where.section == null)) {
           txt += "\nTimes no section covers need one: add a section over "
             + "them, prepare it, edit it, then re-render and re-export.";
         }
-        if (shown.some(covered)) {
-          txt += "\nTimes inside a section: reopen it and check it again. "
-            + "If its check disagrees with this, prepare it again first "
-            + "— a section prepared by an older version has no run-up "
-            + "frames cached, and without them its check cannot see flashing "
-            + "in its opening second.";
+        if (inSection.length) {
+          txt += "\nTimes inside a section: open it and run Check Safety at "
+            + "the time given. The check reads the same frames on the same "
+            + "timeline the render lays down, so the two should agree; where "
+            + "they do not, this export was built from an older render of "
+            + "that section — render it full-res again and re-export.";
+          const notes = new Set();
+          for (const x of inSection) {
+            const sec = (state.project.sections || {})[x.where.section];
+            for (const n of ((sec || {}).check_context_notes || [])) notes.add(n);
+          }
+          for (const n of notes) txt += "\n" + n;
         }
         if (res.wcag_safe) {
           txt += "\nThese pass WCAG but are extended flashes — "

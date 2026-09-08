@@ -25,7 +25,13 @@ import numpy as np
 
 from . import ffio
 from .analysis import analyze_file
-from .editing import analyze_rendered_section, cache_shift
+# section_timeline is the one account of where a section begins, what it
+# shows and when. The renderer, the exporter and the safety check all read
+# it, so they cannot disagree: a check reasoning about a slightly different
+# span than the one that gets written is a check that can pass footage the
+# export then fails.
+from .editing import (analyze_rendered_section, cache_shift,
+                      section_timeline)
 from .ffio import FFMPEG, FFError, CREATE_NO_WINDOW
 
 # Every part handed to the concat demuxer must share one mp4 timescale. With
@@ -65,7 +71,15 @@ def _pick_grid_fps(rel_pts):
     if len(durs) == 0:
         return 120
     fps = 1.0 / float(np.median(durs))
-    grid = 100 if (abs(fps - 25) < 1.5 or abs(fps - 50) < 2.5) else 120
+    # 100 divides 25 and 50 exactly, 120 divides 24, 30 and 60: on a
+    # constant-rate source picked this way, every frame lands on a slot
+    # boundary and the render carries the source's own timing exactly.
+    # The PAL bands have to be tight enough to leave the film rates out --
+    # a band wide enough to reach 24 sends it to the one grid that cannot
+    # represent it, and it comes out 5 ms from where the check puts it.
+    # Nothing makes 24000/1001 or 30000/1001 exact (1001 divides neither
+    # grid), so those keep a residual of half a slot.
+    grid = 100 if (abs(fps - 25) < 0.5 or abs(fps - 50) < 1.0) else 120
     while grid < fps * 1.8:
         grid *= 2
     return grid
@@ -110,37 +124,6 @@ def _audio_filter(segments, rate, target, label="1:a"):
     parts.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[cat];")
     parts.append(f"[cat]apad,atrim=0:{target:.6f},asetpts=PTS-STARTPTS[outa]")
     return "".join(parts)
-
-
-def _section_timeline(sec):
-    """How a section maps onto the source: (rel_pts, n_out, total, base, med).
-
-    `rel_pts` are the prepared frame times rebased onto the section's first
-    frame, which is what the render emits; `base` is how far that frame falls
-    after the section's nominal start; `n_out` is how many of them the section
-    actually shows (see render_section); `total` is its exact length.
-
-    The renderer and the exporter both go through here so they cannot disagree
-    about where a section begins and ends in the source -- the exporter needs
-    that to place the export's audio.
-    """
-    rel = [float(t) for t in (sec["pts"] or [])]
-    dur = sec["end"] - sec["start"]
-    if not rel:
-        return [], 0, dur, 0.0, 1.0 / 30
-    deltas = np.diff(rel)
-    ok = len(deltas) and (deltas > 1e-9).any()
-    med = float(np.median(deltas[deltas > 1e-9])) if ok else 1.0 / 30
-    # Frames at or past the section's end belong to the untouched span that
-    # follows it: `-t` is enforced on decode timestamps, so the decode runs a
-    # frame or so past the end, and the next span -- seeking to that same end
-    # -- opens with that very frame. Showing it in both plays it twice and
-    # starts everything after the section late.
-    n_out = sum(1 for t in rel if t < dur - 1e-9) or len(rel)
-    base = rel[0]
-    out = [t - base for t in rel]
-    total = out[n_out] if n_out < len(out) else out[-1] + med
-    return out, n_out, total, base, med
 
 
 def _section_cuts(sec, rel_pts, n_out):
@@ -202,7 +185,7 @@ def render_section(project, sid, source, out_path, job=None,
     # the section's canonical (sanitized) timeline drives output timing —
     # identical to what the safety simulation used
     grid = _pick_grid_fps([float(t) for t in (sec["pts"] or [])])
-    rel_pts, n_out, total, base, med_delta = _section_timeline(sec)
+    rel_pts, n_out, total, base, med_delta = section_timeline(sec)
     cut_times = _section_cuts(sec, rel_pts, n_out)
 
     # frame N of this decode is the section's frame N + shift
@@ -379,7 +362,22 @@ def _detector_sig(project):
 
 
 def _emit(pipe, frame_bytes, slot, end_t, grid):
-    end_slot = int(round(end_t * grid))
+    """Hold `frame_bytes` on screen up to `end_t`, in whole grid slots.
+
+    Never for no slots at all. Two pictures can want the same slot: a source
+    timestamp anomaly puts a pair of frames microseconds apart (this happens
+    in ordinary stream VODs), and a variable-rate capture bursts above the
+    grid rate whenever the recorder catches up. Rounding then hands the
+    second one an end no later than the first one's, and it is written zero
+    times -- a frame that is in the grid the marks were made on, and in the
+    check, but not in the video, so keeping it or removing it makes no
+    difference to the output and the two stop agreeing.
+
+    The slot it takes is borrowed from its neighbour, not added: the next
+    picture whose own end lies far enough ahead gets one fewer, so the run
+    still ends where the timeline says it should.
+    """
+    end_slot = max(slot + 1, int(round(end_t * grid)))
     while slot < end_slot:
         pipe.write(frame_bytes)
         slot += 1
@@ -484,7 +482,7 @@ def _part_anchors(plan, ts_min):
     for item in plan:
         if item[0] == "section":
             sec = item[1]
-            rel, n_out, total, base, _ = _section_timeline(sec)
+            rel, n_out, total, base, _ = section_timeline(sec)
             anchors.append(sec["start"] + base)
             cursor = sec["start"] + base + total
         else:
@@ -500,7 +498,7 @@ def _expected_durations(plan, anchors, ts_max, ext):
     for item, a, nxt in zip(plan, anchors, anchors[1:] + [ts_max]):
         n_cuts = 0
         if item[0] == "section":
-            rel, n_out, _, _, _ = _section_timeline(item[1])
+            rel, n_out, _, _, _ = section_timeline(item[1])
             n_cuts = len(_section_cuts(item[1], rel, n_out))
         out.append(nxt - a + ext * n_cuts)
     return out
@@ -934,8 +932,23 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
     prog(0.98, "sanity-checking output timing")
     warnings += _timing_sanity(out_path, files, sum(stated))
 
+    # Where each part ended up in the exported file. A verify pass reads the
+    # export's own timeline, and that is not the source's: every extension
+    # pushes everything after it later, and the drift accumulates. Without
+    # this, a failure reported at 19:08 of the export gets looked up against
+    # 19:08 of the source and blamed on whichever section happens to sit
+    # there -- which, once an edit has moved things, is the wrong one.
+    layout = []
+    cursor = 0.0
+    for item, anchor, dur in zip(plan, anchors, stated):
+        span = {"start": round(cursor, 6), "end": round(cursor + dur, 6),
+                "src_start": round(anchor, 6),
+                "section": item[1]["id"] if item[0] == "section" else None}
+        layout.append(span)
+        cursor += dur
+
     entry = {"path": out_path, "mode": mode, "assembly": assembly,
-             "verify": None, "warnings": warnings}
+             "verify": None, "warnings": warnings, "layout": layout}
     with project.lock:
         project.data["export"] = entry
         project.save()
@@ -983,6 +996,48 @@ def _timing_sanity(path, part_files, expected):
             f"Output has {idx['discontinuities']} timestamp gap(s) >5s — "
             "players may freeze there; check the file.")
     return warnings
+
+
+def locate_in_export(project, t):
+    """Where a moment of the exported file came from: the section that holds
+    it (if any), how far into that section's own timeline it falls, and the
+    source time it corresponds to.
+
+    The offset is the useful half. A section's check, its preview and its
+    frame grid all speak the section's own timeline, so "section #6, at
+    0:03.41" says which section to open *and* where to look once it is open;
+    the export time on its own says neither.
+
+    Returns None when the export predates this bookkeeping, so a caller can
+    say it does not know rather than guess.
+    """
+    exp = project.data.get("export") or {}
+    layout = exp.get("layout")
+    if not layout:
+        return None
+    for span in layout:
+        if span["start"] - 1e-6 <= t <= span["end"] + 1e-6:
+            off = t - span["start"]
+            return {"section": span.get("section"), "at": round(off, 3),
+                    "src": round(span["src_start"] + off, 3)}
+    return {"section": None, "at": None, "src": None}
+
+
+def locate_violations(project, verdict):
+    """Annotate a verify verdict's violations with where in the project they
+    came from, so the report can name a section instead of a raw timestamp."""
+    for v in verdict.get("violations") or []:
+        # the peak is the moment worth watching; fall back to the start
+        where = locate_in_export(project, v.get("peak", v["start"]))
+        if where is None:
+            continue
+        v["where"] = where
+        span = locate_in_export(project, v["start"])
+        # a failure spanning a section edge belongs to the section it starts
+        # in as much as to the one its worst moment lands in; name both
+        if span and span.get("section") != where.get("section"):
+            v["where_start"] = span
+    return verdict
 
 
 def verify_file(project, path, job=None):

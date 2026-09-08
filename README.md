@@ -281,6 +281,31 @@ frame-to-frame timing throughout, VFR included. Sections work on the
 repaired timeline; frame identity is the ordinal within a section, with
 per-frame timestamps from ffmpeg's `showinfo` as ground truth.
 
+Because of all that, how densely a file samples its own footage varies: a
+rendered section carries three or four times the frames per second of the
+untouched material either side of it, and a screen or game capture can
+change rate from moment to moment. The detector is deliberately blind to
+this. It measures sustained flashing in seconds rather than in frames, it
+searches window positions continuously instead of only where frames happen
+to fall, and a frame that merely repeats the one before it is not counted as
+a fresh observation of anything. So the same footage gets the same verdict
+whether it is checked from the cache, rendered, or verified inside the
+finished export — which is what makes "every section passes" mean "the
+export passes". (Before this, the extended-flash test counted frames, so a
+rendered section outvoted its own neighbours four to one and could fail a
+check its source footage passed.)
+
+The render grid is chosen to carry the source's timing exactly where it can:
+100 slots a second divides 25 and 50, 120 divides 24, 30 and 60. The
+1000/1001 rates (23.976, 29.97, 59.94) divide neither and keep a residual of
+half a slot, about 4 ms, as does any variable-rate source; that moves the
+times a verify reports by a few milliseconds but has not been seen to change
+a verdict. Where the source crowds two frames onto one slot -- a timestamp
+anomaly putting a pair microseconds apart, which ordinary stream VODs do
+contain -- both are still written, one borrowing a slot that the next frame
+with room hands back, so a marked frame never silently fails to reach the
+video and the run keeps its length.
+
 ## Limitations — please read
 
 - **This is risk reduction, not a guarantee.** Passing the detector means

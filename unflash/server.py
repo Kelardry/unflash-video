@@ -27,7 +27,7 @@ from .editing import prepare_section, suggest_edits, check_section
 from .jobs import JobManager
 from .project import Project, SectionNotFound, project_dir_video
 from .render import (render_section, export_video, verify_file,
-                     filter_assembly_estimate)
+                     locate_violations, filter_assembly_estimate)
 
 app = Flask(__name__, static_folder=None)
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -749,6 +749,9 @@ def verify_export():
 
     def run(job):
         verdict = verify_file(p, exp["path"], job=job)
+        # the verdict's times are the exported file's own; turn them into
+        # somewhere the user can go -- a section, and a moment inside it
+        locate_violations(p, verdict)
         with p.lock:
             p.data["export"]["verify"] = verdict
             p.save()
