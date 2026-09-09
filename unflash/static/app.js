@@ -349,6 +349,23 @@ function violationWhere(v) {
     + `–${fmtTime(Math.min(v.end, peak + 1.0))}`;
 }
 
+// A general or red flash is reported with `count` as a multiple of the area
+// threshold, so a count barely over 1 is footage sitting on the line. That
+// is worth saying: the export is re-encoded, which moves the measurement by
+// a few percent on its own, so content this close passes one rendition and
+// fails another and there is nothing to find by looking harder at it.
+const MARGINAL = 1.15;
+
+function isMarginal(v) {
+  return v.kind !== "extended" && v.count > 0 && v.count < MARGINAL;
+}
+
+function marginNote(v) {
+  if (!isMarginal(v)) return "";
+  return `  (only ${Math.round((v.count - 1) * 100)}% over the area `
+    + "threshold — just over the line)";
+}
+
 // The failures themselves, not just how many of them. A section can run half
 // a minute, and "1 extended flash" leaves nowhere inside it to look; these
 // times are on the section's own timeline — the one the frame grid, the
@@ -359,6 +376,7 @@ function violationLines(res) {
     .slice().sort((a, b) => a.start - b.start);
   const past = new Set((res.after || []).map((v) => v.start));
   return shown.map((v) => `${kindLabel(v.kind)} ${violationWhere(v)}`
+    + marginNote(v)
     + (past.has(v.start)
        ? " (past this section's last frame — fix it in the next section)" : ""));
 }
@@ -1160,6 +1178,15 @@ $("btnCheck").onclick = () => {
       if (!res.safe && res.wcag_safe) {
         msg += " (No WCAG failure left — what remains is extended flashing.)";
       }
+      const edge = (res.violations || []).filter(isMarginal);
+      if (edge.length) {
+        msg += " " + edge.map((v) => `${kindLabel(v.kind)} `
+          + `${violationWhere(v)}${marginNote(v)}`).join("; ")
+          + ". Content this close to the threshold lands on either side of it "
+          + "depending on the encode, so the render and the exported file may "
+          + "well disagree with this; trim it a little further than looks "
+          + "necessary and it stops moving.";
+      }
       // flashing the edits leave in the run-out: real in the export, but past
       // this section's last frame, so nothing here can remove it
       const after = res.after || [];
@@ -1298,9 +1325,7 @@ $("btnVerifyExport").onclick = async () => {
           const w = x.where;
           let where;
           if (!w) {
-            where = "somewhere this export cannot place — it was made before "
-              + "the layout was recorded, so export again to have failures "
-              + "traced back to a section";
+            where = "somewhere this export cannot place";
           } else if (w.section != null) {
             where = `in section #${w.section}, at ${fmtTime(w.at)} on its `
               + "own timeline";
@@ -1318,7 +1343,8 @@ $("btnVerifyExport").onclick = async () => {
               ? `, beginning in section #${from.section} at ${fmtTime(from.at)}`
               : ", beginning in material no section covers";
           }
-          return `  • ${kindLabel(x.kind)} ${violationWhere(x)} — ${where}`;
+          return `  • ${kindLabel(x.kind)} ${violationWhere(x)} — ${where}`
+            + marginNote(x);
         });
         txt = `✗ Exported file still fails (profile: ${res.profile}):\n`
           + rows.join("\n");
@@ -1339,6 +1365,21 @@ $("btnVerifyExport").onclick = async () => {
             for (const n of ((sec || {}).check_context_notes || [])) notes.add(n);
           }
           for (const n of notes) txt += "\n" + n;
+        }
+        if (shown.some((x) => x.where && x.where.inferred)) {
+          txt += "\nThis export was made before the tool recorded its own "
+            + "layout, so the places above were worked back from the "
+            + "sections as they stand now. Re-cutting a section since the "
+            + "export would put them out; export again to have them read "
+            + "off the file itself.";
+        }
+        if (shown.some(isMarginal)) {
+          txt += "\nA failure marked as just over the line is flashing at "
+            + "almost exactly the threshold, and an export is re-encoded: "
+            + "that alone moves the measurement by a few percent, so the "
+            + "same footage can pass a check and fail the exported file. "
+            + "Editing it until it has real margin is what settles it — "
+            + "trimming a little more than looks necessary.";
         }
         if (res.wcag_safe) {
           txt += "\nThese pass WCAG but are extended flashes — "

@@ -41,6 +41,28 @@ import numpy as np
 from .config import DetectorConfig
 from . import ffio
 
+# How long a pixel may go on accumulating one monotonic run before the run
+# is re-anchored to where it has got to.
+#
+# The tracker exists so that a flash ramping over a few frames still counts as
+# one transition. Left uncapped it will also add up a drift that takes half a
+# minute -- a scene slowly brightening, a fade, a camera adjusting exposure --
+# and report the whole accumulated swing as a "transition" the moment the
+# pixel finally turns. Nothing that slow is a flash: a flash is a pair of
+# opposing changes inside a second, so a swing that took longer than that
+# cannot be half of one.
+#
+# It also makes the detector's memory finite, and that is what section
+# editing rests on. A section is checked by starting the detector cold a
+# little before it (see context_seconds); if a pixel's run can reach back
+# arbitrarily far, the check measures its swing from a different value than
+# a pass over the whole video does, and the two disagree -- a section that
+# checks safe, fails on the exported file, and passes again when you put a
+# fresh section over the spot and check that. Measured on real footage, a
+# fifth of the picture was mid-run from more than six seconds earlier, some
+# of it from twenty-six seconds earlier.
+MAX_RUN_SECONDS = 2.0
+
 # --- sRGB -> linear lookup table -------------------------------------------
 _LUT = np.empty(256, np.float32)
 for _c in range(256):
@@ -129,24 +151,51 @@ class AnalysisResult:
 
 
 class _ExtremaTracker:
-    """Vectorized per-pixel monotonic-run tracker with noise deadband."""
+    """Vectorized per-pixel monotonic-run tracker with noise deadband.
 
-    def __init__(self, eps):
+    Each run is re-anchored once it is `max_run` seconds old, so the swing a
+    pixel eventually reports is always one it made recently and the tracker's
+    state stops depending on footage older than that. See MAX_RUN_SECONDS.
+    """
+
+    def __init__(self, eps, max_run=MAX_RUN_SECONDS):
         self.eps = eps
+        self.max_run = max_run
         self.dir = None
         self.base = None   # value at the start of the current run
         self.ext = None    # extremum of the current run
+        self.base_t = None  # when the run's base was set
         self.aux_base = None
         self.aux_ext = None
 
-    def feed(self, x, aux=None):
-        """Feed a new value plane. Returns (rev_up, rev_down, base, ext,
-        aux_base, aux_ext) where the masks flag pixels whose upward/downward
-        run just completed; base/ext are snapshots valid at those pixels."""
+    def settle(self, t):
+        """Age the runs on a frame that only repeated the one before it.
+
+        Nothing moved, so there is nothing to track -- but time passed, and
+        the cap is measured in time. Without this, a picture held on screen
+        (a still passage, a removed frame, a source that repeats every fifth
+        picture) would let a run that was already old sail through it
+        untouched, and the bound the section check relies on would not hold.
+        """
+        if self.dir is None:
+            return
+        stale = (t - self.base_t) > self.max_run
+        if stale.any():
+            self.base[stale] = self.ext[stale]
+            self.base_t[stale] = t
+            if self.aux_base is not None:
+                self.aux_base[stale] = self.aux_ext[stale]
+
+    def feed(self, x, t, aux=None):
+        """Feed a new value plane, stamped `t` on the internal clock. Returns
+        (rev_up, rev_down, base, ext, aux_base, aux_ext) where the masks flag
+        pixels whose upward/downward run just completed; base/ext are
+        snapshots valid at those pixels."""
         if self.dir is None:
             self.dir = np.zeros(x.shape, np.int8)
             self.base = x.copy()
             self.ext = x.copy()
+            self.base_t = np.full(x.shape, t, np.float64)
             if aux is not None:
                 self.aux_base = aux.copy()
                 self.aux_ext = aux.copy()
@@ -179,6 +228,7 @@ class _ExtremaTracker:
         if rev.any():
             self.base[rev] = self.ext[rev]
             self.ext[rev] = x[rev]
+            self.base_t[rev] = t
             self.dir[rev_up] = -1
             self.dir[rev_down] = 1
             if aux is not None:
@@ -195,6 +245,19 @@ class _ExtremaTracker:
             self.ext[started] = x[started]
             if aux is not None:
                 self.aux_ext[started] = aux[started]
+
+        # Re-anchor runs that have gone on too long, so nothing the tracker
+        # still holds is older than max_run. A pixel that has been drifting
+        # (or sitting inside the deadband) since long before this pass began
+        # would otherwise measure its next swing from that distant value.
+        # A pixel with no run has no extremum to fall back on, so its
+        # reference is simply where it is now; settle() does the rest.
+        idle = (self.dir == 0) & ((t - self.base_t) > self.max_run)
+        if idle.any():
+            self.ext[idle] = x[idle]
+            if aux is not None:
+                self.aux_ext[idle] = aux[idle]
+        self.settle(t)
 
         return rev_up, rev_down, base_snap, ext_snap, aux_base_snap, aux_ext_snap
 
@@ -416,9 +479,9 @@ class FlashDetector:
         tc = self._advance_clock(t)
         # A picture merely held on screen is not a fresh observation. No
         # pixel moved, so no transition can complete and no extremum can
-        # turn: feeding it leaves every tracker exactly as it was, and the
-        # only thing it can still do is re-report the flashing of the frame
-        # it repeats, one frame-time later than that frame.
+        # turn: tracking it would leave every tracker as it was, and the only
+        # thing it could still do is re-report the flashing of the frame it
+        # repeats, one frame-time later than that frame.
         #
         # That matters because held frames are not rare. Rendering re-times
         # a section onto a constant-rate grid (see render._pick_grid_fps),
@@ -433,6 +496,10 @@ class FlashDetector:
         # sustained-flashing windows like any other quiet moment.
         if self._prev is not None and np.array_equal(frame, self._prev):
             self.held += 1
+            # the runs still age: time passes while a picture is held, and a
+            # long still passage must not carry an old run across it
+            for tr in (self.lum, self.red, self.mtrack_gen, self.mtrack_red):
+                tr.settle(tc)
             self.stat_t.append(t)
             self.stat_tc.append(tc)
             self.stat_lum.append(self.stat_lum[-1])
@@ -455,14 +522,14 @@ class FlashDetector:
         sat = (total > 1e-5) & (R >= cfg.red_saturation * total)
         V = np.maximum(R - G - B, 0.0) * 320.0
 
-        rev_up, rev_dn, base, ext, _, _ = self.lum.feed(L)
+        rev_up, rev_dn, base, ext, _, _ = self.lum.feed(L, tc)
         # upward run: base is darker end; downward run: ext is darker end
         q_up = rev_up & ((ext - base) >= cfg.swing_threshold) & \
             (base < cfg.dark_threshold)
         q_dn = rev_dn & ((base - ext) >= cfg.swing_threshold) & \
             (ext < cfg.dark_threshold)
 
-        r_up, r_dn, rbase, rext, raux_b, raux_e = self.red.feed(V, aux=sat)
+        r_up, r_dn, rbase, rext, raux_b, raux_e = self.red.feed(V, tc, aux=sat)
         # the transition must go INTO or OUT OF saturated red (the states at
         # the two ends of the swing differ). Brightness wobble within a
         # continuously-red scene changes V but is not a red flash — genuine
@@ -474,13 +541,14 @@ class FlashDetector:
         # --- coherence gate: window-mean flash tracking ---------------------
         npix = self.ww * self.wh
         mL = self._window_sums(L) / npix
-        mu, md, mb, me, _, _ = self.mtrack_gen.feed(mL.astype(np.float32))
+        mu, md, mb, me, _, _ = self.mtrack_gen.feed(mL.astype(np.float32), tc)
         self.mflash_gen.transitions(mu & ((me - mb) >= self.mean_swing),
                                     1, tc)
         self.mflash_gen.transitions(md & ((mb - me) >= self.mean_swing),
                                     -1, tc)
         mV = self._window_sums(V) / npix
-        ru2, rd2, rb2, re2, _, _ = self.mtrack_red.feed(mV.astype(np.float32))
+        ru2, rd2, rb2, re2, _, _ = self.mtrack_red.feed(
+            mV.astype(np.float32), tc)
         self.mflash_red.transitions(
             ru2 & ((re2 - rb2) >= self.mean_swing_red), 1, tc)
         self.mflash_red.transitions(
@@ -857,16 +925,24 @@ def context_seconds(cfg) -> float:
 
     Everything the detector carries forward is bounded: a flash pairs two
     transitions at most 1 s apart, the failure test looks back over 1 s of
-    flashes, and the per-pixel extrema trackers need one reversal to settle.
-    Feed it that much real footage first and its state at the hand-over is
-    the state a full pass would have arrived with -- start it cold instead
-    and it is simply blind for that long, which is why a section that its own
-    check calls safe can still be flashing in its opening second.
+    flashes, and a per-pixel monotonic run is re-anchored once it reaches
+    MAX_RUN_SECONDS, so no tracker holds a value older than that. Feed it
+    that much real footage first and its state at the hand-over is the state
+    a full pass would have arrived with -- start it cold instead and it is
+    simply blind for that long, which is why a section that its own check
+    calls safe can still be flashing in its opening second.
+
+    The run cap is the reason the last term is a constant rather than a
+    guess. Without it a pixel could still be part-way through a swing it
+    began half a minute earlier, no run-up would be long enough to guarantee
+    the same state, and a section could check safe, fail on the export, and
+    check safe again on a fresh section drawn over the very same frames.
 
     An extended flash is measured over a whole `extended_window`, so profiles
     that flag those need the run-up to cover one.
     """
-    base = 1.0 + 1.0 + 0.5      # pairing + failure window + tracker settling
+    base = 1.0 + 1.0 + MAX_RUN_SECONDS + 0.5   # pairing + failure window
+                                              # + run cap + margin
     if cfg.flag_extended:
         base = max(base, cfg.extended_window + cfg.extended_hold + 0.5)
     return base

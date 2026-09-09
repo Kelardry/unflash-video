@@ -1008,19 +1008,54 @@ def locate_in_export(project, t):
     0:03.41" says which section to open *and* where to look once it is open;
     the export time on its own says neither.
 
-    Returns None when the export predates this bookkeeping, so a caller can
-    say it does not know rather than guess.
+    An export made before this bookkeeping existed has no layout saved, so
+    one is worked out from the sections as they stand now -- the same
+    arithmetic the export itself did. That is right as long as nothing has
+    been re-cut since, which the result says with `inferred`, rather than
+    leaving the user at a dead end in front of a file they cannot re-export.
     """
     exp = project.data.get("export") or {}
     layout = exp.get("layout")
+    inferred = False
+    if not layout:
+        layout = _infer_layout(project)
+        inferred = True
     if not layout:
         return None
     for span in layout:
         if span["start"] - 1e-6 <= t <= span["end"] + 1e-6:
             off = t - span["start"]
             return {"section": span.get("section"), "at": round(off, 3),
-                    "src": round(span["src_start"] + off, 3)}
-    return {"section": None, "at": None, "src": None}
+                    "src": round(span["src_start"] + off, 3),
+                    "inferred": inferred}
+    return {"section": None, "at": None, "src": None, "inferred": inferred}
+
+
+def _infer_layout(project):
+    """Rebuild an old export's layout from the project as it stands.
+
+    Only sections that have been rendered can have been in it -- the export
+    refuses to run otherwise -- so those are the ones laid out here.
+    """
+    try:
+        ts_min, ts_max = project.bounds
+        sections = [s for s in project.sections_sorted() if s.get("render")]
+        if not sections:
+            return None
+        plan = _span_plan(sections, ts_min, ts_max)
+        anchors = _part_anchors(plan, ts_min)
+        durations = _expected_durations(
+            plan, anchors, ts_max, project.render_config.extension_seconds)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    out, cursor = [], 0.0
+    for item, anchor, dur in zip(plan, anchors, durations):
+        sid = item[1]["id"] if item[0] == "section" else None
+        out.append({"start": round(cursor, 6),
+                    "end": round(cursor + dur, 6),
+                    "src_start": round(anchor, 6), "section": sid})
+        cursor += dur
+    return out
 
 
 def locate_violations(project, verdict):

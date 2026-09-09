@@ -256,6 +256,23 @@ it; they show as unchecked until you re-check.
 Sections prepared by an earlier version have no cached run-up. They still
 check, but cold — the check says so, and preparing them again fixes it.
 
+**A run-up only works if the detector's memory is finite.** It was not.
+The per-pixel tracker accumulates one monotonic run so that a flash ramping
+over a few frames still counts as a single transition, and until the pixel
+turns, the swing it will eventually report is measured from wherever that run
+began. On a slow drift — a fade, a scene brightening, exposure adjusting —
+a pixel can be mid-run for half a minute. Measured on real footage, a fifth
+of the picture was mid-run from more than six seconds earlier and some of it
+from twenty-six seconds earlier, so a check starting cold a few seconds
+before a section measured different swings than a pass over the whole video
+did. That is a section that passes its own check, fails when the export is
+verified, and passes again when you draw a fresh section over the very same
+frames and check that — with nothing you can edit to break the loop. A run is
+now re-anchored once it reaches `MAX_RUN_SECONDS`, which bounds the memory
+and makes the run-up length an honest promise. Nothing that slow was ever a
+flash: a flash is a pair of opposing changes inside a second, so a swing that
+took longer than that cannot be half of one.
+
 Violations are reported with their onset, their end, and the worst moment
 inside them, because a long flashing passage merges into one span and the
 span alone does not say where to look.
