@@ -549,7 +549,7 @@ def _audio_segments(plan, anchors, durations, ext):
         cuts = []
         if item[0] == "section":
             sec = item[1]
-            rel, n_out, _, _, _ = _section_timeline(sec)
+            rel, n_out, _, _, _ = section_timeline(sec)
             cuts = _section_cuts(sec, rel, n_out)
         segs += _span_segments(src, dur, cuts, ext)
         src += dur - ext * len(cuts)
