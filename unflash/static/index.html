@@ -82,6 +82,7 @@
         <input type="text" id="secEnd" size="10" title="section end">
         <button id="btnApplyRange" class="small" title="Change this section's time range (resets preparation and edits)">apply range</button>
       </span>
+      <button id="btnReprepare" class="small" title="Analyze this section again with the current detection profile and rebuild its proxy and thumbnails — your frame marks are kept">re-prepare section</button>
       <button id="btnDeleteSection" class="small danger">delete section</button>
     </div>
     <div id="wsWarnings" class="ws-warnings hidden"></div>
@@ -131,21 +132,22 @@
       <div class="grid-head">
         <h3>Frames <span id="frameCount"></span></h3>
         <div class="legend">
-          <span class="chip removed">removed</span>
+          <span class="chip removed" title="Removed either way — the badge on the frame names the one shown in its place">removed</span>
           <span class="chip extended">extended</span>
           <span class="chip flagged">in flash event</span>
           <span class="chip flagged-red">in red-flash event</span>
           <span class="chip selected">selected</span>
         </div>
         <div class="grid-actions">
-          <button id="btnMarkRemoved" class="small">R — toggle removed</button>
+          <button id="btnMarkRemoved" class="small" title="Remove the selected frames, holding the last kept frame BEFORE them in their place">R — remove, show previous</button>
+          <button id="btnMarkRemovedNext" class="small" title="Remove the selected frames, showing the first kept frame AFTER them in their place">F — remove, show next</button>
           <button id="btnMarkExtended" class="small">E — toggle extended</button>
           <button id="btnUnmark" class="small">U — unmark</button>
           <button id="btnSelectFlagged" class="small" title="Select frames in the original analysis' flash events">select flagged</button>
           <button id="btnSelectUnsafe" class="small danger hidden" title="Select the frames inside the failing windows of the last safety check">select unsafe frames</button>
         </div>
       </div>
-      <div class="grid-hint">Click selects · shift-click selects the run between clicks · with <b>Caps Lock on</b>, shift-click selects a rectangle instead · ctrl-click adds/removes · Esc clears.</div>
+      <div class="grid-hint">Click selects · shift-click selects the run between clicks · with <b>Caps Lock on</b>, shift-click selects a rectangle instead · ctrl-click adds/removes · Esc clears.<br><b>R</b> removes showing the previous kept frame, <b>F</b> the next one — both outline the frame in red, and the badge on it says which frame shows in its place. A run marked <b>F</b> at the very end of the section (with nothing kept after it) falls back to the previous frame, as a run marked <b>R</b> at the very start falls forward to the first kept one.</div>
       <div id="frameGrid" class="frame-grid" tabindex="0"></div>
     </div>
   </section>
@@ -156,7 +158,7 @@
     <ol>
       <li>Open a video and <b>Scan</b> it — problem sections are found automatically (WCAG 2.x general-flash and red-flash analysis, plus extended flashes unless the profile is <i>Exact WCAG only</i>). You can also add sections by dragging on the timeline or typing timestamps.</li>
       <li>Open a section and <b>Prepare</b> it (proxy + thumbnails + per-frame analysis) — or use <b>prepare all</b> in the sidebar.</li>
-      <li>Use <b>Suggest</b> (keep-light or keep-dark, optionally restricted to your selection) or mark frames yourself: removed frames are replaced by the last kept frame; extended frames linger for 1&nbsp;s with silent audio.</li>
+      <li>Use <b>Suggest</b> (keep-light or keep-dark, optionally restricted to your selection) or mark frames yourself: a removed frame is replaced by the nearest kept frame — the one before it (<b>R</b>) or the one after it (<b>F</b>); extended frames linger for 1&nbsp;s with silent audio.</li>
       <li><b>Check safety</b> instantly, then <b>Preview render</b> to watch the result. If a check fails, <b>select unsafe frames</b> shows you exactly where the remaining problems are.</li>
       <li><b>Render full-res</b> — this must be done for <b>every</b> section before exporting (<b>render all</b> in the sidebar does them all, skipping up-to-date ones). Sections whose edits changed after rendering are flagged <i>render stale</i>; re-render them.</li>
       <li><b>Export</b> stitches the rendered sections back into the untouched video, then <b>Verify</b> re-scans the final file.</li>

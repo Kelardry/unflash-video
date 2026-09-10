@@ -2,7 +2,8 @@
 
 Detect and repair photosensitive-hazard flashing in videos, while keeping the
 visual information that naive "flash removal" filters destroy.
-Removed frames are replaced by the last kept frame, with timing untouched),
+Removed frames are replaced by the nearest kept frame — the one before them
+or, if you ask, the one after them — with timing untouched),
 Important flash frames can be extended to last for 1 second with silent audio,
 to keep any important information.
 
@@ -80,16 +81,21 @@ Note that two accounts opening the *same* video still share the one
 3. **Prepare a section** (or **prepare all** in the sidebar) — analyzes every
    frame, caches analysis frames, builds a 540p proxy and per-frame
    thumbnails.
-4. **Edit** — mark frames *removed* (red, replaced by last kept frame) or
-   *extended* (blue, held 1 s with silence). Click to select; shift-click
+4. **Edit** — mark frames *removed* (red) or *extended* (blue, held 1 s with
+   silence). A removed frame is replaced by the nearest kept frame in its
+   fill direction: **R** takes the one before it, **F** the one after it.
+   Both look the same in the grid — the badge on the frame names the one
+   that shows in its place. Click to select; shift-click
    selects the run between clicks; with **Caps Lock on**, shift-click selects
    a geometric rectangle in the grid instead (no key-holding needed);
-   ctrl-click adds/removes. Keys **R** / **E** / **U** apply to the
+   ctrl-click adds/removes. Keys **R** / **F** / **E** / **U** apply to the
    selection. **Suggest: keep light / keep dark** proposes a removal set,
    verifies it through the detector, and escalates until the section passes —
-   tick *selection only* to confine its removals to the frames you selected.
-   If the very first frame is removed, it backfills from the first kept
-   frame.
+   tick *selection only* to confine its removals to the frames you selected;
+   its proposals always fill from the previous frame.
+   Where a fill direction runs out it falls back the other way: removals at
+   the very start of a section backfill from the first kept frame, and an
+   **F** run at the very end holds the last kept frame before it.
 5. **Check safety** — instant verdict: your current edits are simulated
    through the detector without rendering anything. If it fails, **select
    unsafe frames** highlights exactly the frames inside the failing
@@ -120,6 +126,9 @@ Note that two accounts opening the *same* video still share the one
    quality. The export self-checks that the output's timing matches the sum
    of its parts. Then **Verify exported file** re-scans the final output
    with your selected detector profile.
+
+A section's own header carries **re-prepare section**, which does the same
+thing for just the one you have open.
 
 The sidebar's **all sections ▾** menu runs one step over the whole project
 at once, for when the detection profile changed or a new version of the

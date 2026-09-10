@@ -319,10 +319,51 @@ def load_cache(project, sid):
 
 
 def _parse_edits(edits):
+    """(removed, extended, fill) per ordinal. `fill` says which surviving
+    frame a removed one stands in for -- the one before it ("prev", the
+    default) or the one after it ("next")."""
     out = {}
     for k, v in (edits or {}).items():
-        out[int(k)] = (bool(v.get("removed")), bool(v.get("extended")))
+        out[int(k)] = (bool(v.get("removed")), bool(v.get("extended")),
+                       "next" if v.get("fill") == "next" else "prev")
     return out
+
+
+def replacement_map(edits, n):
+    """For each of a section's `n` frames, the ordinal whose picture it shows.
+
+    A surviving frame shows itself. A removed one shows the nearest survivor
+    in its fill direction -- the frame before it by default, the frame after
+    it where the mark says "next". Where that direction runs out (removals at
+    the very start of the section, "next" removals at the very end) it falls
+    back to the nearest survivor the other way, so every slot still has a
+    picture to show. A section with nothing left at all holds its first frame.
+    """
+    ed = _parse_edits(edits)
+    gone = [ed.get(i, (False, False, "prev"))[0] for i in range(n)]
+    prev = [None] * n           # nearest survivor at or before i
+    seen = None
+    for i in range(n):
+        if not gone[i]:
+            seen = i
+        prev[i] = seen
+    nxt = [None] * n            # nearest survivor at or after i
+    seen = None
+    for i in range(n - 1, -1, -1):
+        if not gone[i]:
+            seen = i
+        nxt[i] = seen
+    rep = []
+    for i in range(n):
+        if not gone[i]:
+            rep.append(i)
+            continue
+        forward = ed[i][2] == "next"
+        first = nxt[i] if forward else prev[i]
+        other = prev[i] if forward else nxt[i]
+        src = first if first is not None else other
+        rep.append(0 if src is None else src)
+    return rep
 
 
 class SectionContext:
@@ -592,27 +633,18 @@ def shown_pts(sec):
 def edited_sequence(rel_pts, edits, extension_seconds=1.0):
     """The section's edited timeline as [(display_time, source_ordinal)].
 
-    Removed frames are backfilled from the last kept frame and extended ones
-    push everything after them later, exactly as render.py lays them out, so
-    this is the frame order the exported file will actually contain.
+    Removed frames stand in the survivor replacement_map picks for them and
+    extended ones push everything after them later, exactly as render.py lays
+    them out, so this is the frame order the exported file will contain.
     """
     ed = _parse_edits(edits)
     n = len(rel_pts)
-    # if the section starts with removed frames, they are backfilled from the
-    # first kept frame (render.py does the same)
-    first_kept = next((i for i in range(n) if not ed.get(i, (False, False))[0]),
-                      0)
-    last_kept = first_kept
+    rep = replacement_map(edits, n)
     offset = 0.0
     out = []
     for i in range(n):
-        removed, extended = ed.get(i, (False, False))
-        if removed:
-            src = last_kept
-        else:
-            src = i
-            last_kept = i
-        out.append((rel_pts[i] + offset, src))
+        removed, extended, _ = ed.get(i, (False, False, "prev"))
+        out.append((rel_pts[i] + offset, rep[i]))
         if extended and not removed:
             # frame held still for extension_seconds: no transitions occur,
             # but everything after shifts later in time

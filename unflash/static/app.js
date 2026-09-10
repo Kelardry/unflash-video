@@ -7,7 +7,7 @@ const state = {
   project: null,
   sectionId: null,
   section: null,        // full detail of the open section
-  edits: {},            // ordinal(str) -> {removed, extended}
+  edits: {},            // ordinal(str) -> {removed, extended, fill}
   selection: new Set(), // ordinals (int)
   anchor: null,
   flagged: new Set(),
@@ -737,6 +737,8 @@ async function openSection(sid) {
     wsW.innerHTML = warns.map((w) => `⚠ ${w}`).join("<br>");
     renderSectionList();
     drawTimeline();
+    // re-preparing only means anything once there is a preparation to redo
+    $("btnReprepare").classList.toggle("hidden", !d.section.prepared);
     if (!d.section.prepared) {
       $("wsUnprepared").classList.remove("hidden");
       $("wsBody").classList.add("hidden");
@@ -827,6 +829,22 @@ $("btnPrepare").onclick = async () => {
   });
 };
 
+$("btnReprepare").onclick = async () => {
+  const sid = state.sectionId;
+  if (!confirm(`Re-prepare section #${sid}?
+
+`
+    + "It is analyzed again with the current detection profile and its proxy "
+    + "and thumbnails are rebuilt. Your frame marks are kept.")) return;
+  try {
+    const r = await api(`/api/section/${sid}/prepare`, "POST", {});
+    pollJob(r.job, `Re-preparing section #${sid}`, () => {
+      toast("Section re-prepared.");
+      refreshProject(sid);
+    });
+  } catch (e) { toast(e.message, true); }
+};
+
 $("btnDeleteSection").onclick = async () => {
   if (!confirm("Delete this section (its edits and renders)?")) return;
   const sid = state.sectionId;
@@ -881,11 +899,37 @@ $("player").classList.add("dimmed");
 // ---------- edits ----------
 function editOf(i) { return state.edits[String(i)] || null; }
 
-function setEdit(i, removed, extended) {
+// `fill` says which surviving frame a removed one stands in for: "prev"
+// (the default) or "next". Only "next" is recorded, so marks read the same
+// as they always did everywhere else.
+function setEdit(i, removed, extended, fill) {
   const k = String(i);
-  if (!removed && !extended) delete state.edits[k];
-  else state.edits[k] = { removed, extended: extended && !removed };
+  if (!removed && !extended) { delete state.edits[k]; scheduleSave(); return; }
+  const e = { removed, extended: extended && !removed };
+  if (removed && fill === "next") e.fill = "next";
+  state.edits[k] = e;
   scheduleSave();
+}
+
+// For each frame, the ordinal whose picture it shows — the same rule the
+// renderer and the safety check follow (see editing.replacement_map): a
+// removed frame holds the nearest survivor in its fill direction, falling
+// back the other way where that direction runs out.
+function replacementMap(n) {
+  const gone = (i) => { const e = editOf(i); return !!(e && e.removed); };
+  const prev = new Array(n), next = new Array(n), rep = new Array(n);
+  let seen = null;
+  for (let i = 0; i < n; i++) { if (!gone(i)) seen = i; prev[i] = seen; }
+  seen = null;
+  for (let i = n - 1; i >= 0; i--) { if (!gone(i)) seen = i; next[i] = seen; }
+  for (let i = 0; i < n; i++) {
+    if (!gone(i)) { rep[i] = i; continue; }
+    const forward = editOf(i).fill === "next";
+    const first = forward ? next[i] : prev[i];
+    const other = forward ? prev[i] : next[i];
+    rep[i] = first !== null ? first : (other !== null ? other : 0);
+  }
+  return rep;
 }
 
 function scheduleSave() {
@@ -916,13 +960,19 @@ function toggleSelected(kind) {
   if (!state.selection.size) { toast("Select frames first (click, shift-click for ranges)"); return; }
   const items = [...state.selection];
   const first = editOf(items[0]);
+  const removedAs = (f) => !!(first && first.removed
+                              && (first.fill === "next") === (f === "next"));
   let target;
-  if (kind === "removed") target = !(first && first.removed);
+  // R and F each toggle their own kind, so pressing one on a removal marked
+  // the other way flips its direction rather than clearing the mark
+  if (kind === "removed") target = !removedAs("prev");
+  if (kind === "removed-next") target = !removedAs("next");
   if (kind === "extended") target = !(first && first.extended);
   for (const i of items) {
     const e = editOf(i) || { removed: false, extended: false };
-    if (kind === "removed") setEdit(i, target, target ? false : e.extended);
-    else if (kind === "extended") setEdit(i, target ? false : e.removed, target);
+    if (kind === "removed") setEdit(i, target, target ? false : e.extended, "prev");
+    else if (kind === "removed-next") setEdit(i, target, target ? false : e.extended, "next");
+    else if (kind === "extended") setEdit(i, target ? false : e.removed, target, e.fill);
     else setEdit(i, false, false);
   }
   updateGridClasses();
@@ -930,6 +980,7 @@ function toggleSelected(kind) {
 }
 
 $("btnMarkRemoved").onclick = () => toggleSelected("removed");
+$("btnMarkRemovedNext").onclick = () => toggleSelected("removed-next");
 $("btnMarkExtended").onclick = () => toggleSelected("extended");
 $("btnUnmark").onclick = () => toggleSelected("unmark");
 $("btnClearEdits").onclick = () => {
@@ -967,6 +1018,7 @@ document.addEventListener("keydown", (ev) => {
   if (!state.section || !state.section.prepared) return;
   const k = ev.key.toLowerCase();
   if (k === "r") toggleSelected("removed");
+  else if (k === "f") toggleSelected("removed-next");
   else if (k === "e") toggleSelected("extended");
   else if (k === "u") toggleSelected("unmark");
   else if (k === "escape") { state.selection.clear(); state.anchor = null; updateGridClasses(); }
@@ -1051,19 +1103,7 @@ function onCellClick(i, ev) {
 
 function updateGridClasses() {
   const grid = $("frameGrid");
-  let lastKept = 0;
-  const rep = {};
-  const n = state.section.n_frames;
-  // leading removed frames are backfilled from the first kept frame
-  let firstKept = 0;
-  while (firstKept < n && editOf(firstKept) && editOf(firstKept).removed) firstKept++;
-  if (firstKept >= n) firstKept = 0;
-  lastKept = firstKept;
-  for (let i = 0; i < n; i++) {
-    const e = editOf(i);
-    if (e && e.removed) rep[i] = lastKept;
-    else lastKept = i;
-  }
+  const rep = replacementMap(state.section.n_frames);
   for (const cell of grid.children) {
     const i = +cell.dataset.i;
     const e = editOf(i);

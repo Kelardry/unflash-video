@@ -31,7 +31,7 @@ from .analysis import analyze_file
 # span than the one that gets written is a check that can pass footage the
 # export then fails.
 from .editing import (analyze_rendered_section, cache_shift,
-                      section_timeline)
+                      section_timeline, replacement_map)
 from .ffio import FFMPEG, FFError, CREATE_NO_WINDOW
 
 # Every part handed to the concat demuxer must share one mp4 timescale. With
@@ -232,20 +232,55 @@ def render_section(project, sid, source, out_path, job=None,
             job.set_progress(p, msg)
 
     n_expected = len(rel_pts)
-    # leading removed frames are backfilled: nothing is emitted until the
-    # first kept frame arrives, which then fills the slots from t=0
-    first_kept = next(
-        (i for i in range(n_expected)
-         if not edits.get(i, {}).get("removed")), 0)
-    last_kept = None
+    # Which picture each output slot shows (see editing.replacement_map).
+    # A removed frame standing in the one *after* it names a picture the
+    # decode has not reached yet, so slots are queued with the end time they
+    # were given and written once their source arrives, rather than as the
+    # frames come. Queuing costs nothing in timing: _emit places a slot by
+    # its end time, not by when it was handed over.
+    rep = replacement_map(edits, n_out)
+    needed = set(rep)
+    have = {}       # source ordinal -> encoded bytes, pruned as they retire
+    queue = []      # [source ordinal, end time or None] in output order
+    # the newest stored source: the one every later "prev" removal asks for
+    last_src = None
+    written = None  # bytes of the slot most recently emitted
     slot = 0
     offset = 0.0
     last_rel = 0.0
     i = -1
+
+    def flush(final=False):
+        """Write every queued slot whose end time and picture are both known."""
+        nonlocal slot, written
+        while queue:
+            source, end = queue[0]
+            if end is None:
+                break
+            buf = have.get(source)
+            if buf is None:
+                if not final:
+                    break               # its picture is still ahead
+                # a decode that stopped short never handed it over; hold the
+                # previous picture rather than losing the slot's time
+                buf = written
+                if buf is None:
+                    queue.pop(0)
+                    continue
+            slot = _emit(proc.stdin, buf, slot, end, grid)
+            written = buf
+            queue.pop(0)
+        # a stored picture retires once nothing queued names it and it is no
+        # longer the newest survivor
+        keep = {q[0] for q in queue}
+        if last_src is not None:
+            keep.add(last_src)
+        for s in [s for s in have if s not in keep]:
+            del have[s]
+
     try:
         it = ffio.iter_frames(src, w, h, start=seek, duration=dur,
                               cancel=(job.cancelled if job else None))
-        pending = None  # frame bytes held until we know the next frame's time
         for i, (t, frame) in enumerate(it):
             k = i + shift       # the prepared ordinal this picture holds
             if k < 0:
@@ -255,28 +290,26 @@ def render_section(project, sid, source, out_path, job=None,
             # canonical timeline: sanitized pts recorded at prepare time
             rel = rel_pts[k] if k < n_expected else last_rel + med_delta
             e = edits.get(k, {})
-            if e.get("removed") and (last_kept is not None or k < first_kept):
-                out_frame = last_kept          # may be None while backfilling
-            else:
-                out_frame = frame.tobytes()
-                last_kept = out_frame
-            # flush the previous frame now that its end time is known
-            if pending is not None:
-                slot = _emit(proc.stdin, pending, slot, rel + offset, grid)
+            # the slot before this one ends where this one begins
+            if queue:
+                queue[-1][1] = rel + offset
+            if k in needed:
+                have[k] = frame.tobytes()
+                last_src = k
+            queue.append([rep[k], None])
+            flush()
             if e.get("extended") and not e.get("removed"):
                 offset += ext
-            if out_frame is not None:
-                pending = out_frame
             last_rel = rel
             if job and i % 100 == 0:
                 p = 0.9 * min(1.0, (k + 1) / max(1, n_expected))
                 prog(p, f"rendering frame {k + 1}"
                      + (f"/{n_expected}" if n_expected else ""))
         # last frame runs to exactly the timeline end (matches the audio)
-        if pending is not None:
-            end = (total if n_out < n_expected
-                   else max(total, last_rel + med_delta)) + offset
-            slot = _emit(proc.stdin, pending, slot, end, grid)
+        if queue:
+            queue[-1][1] = (total if n_out < n_expected
+                            else max(total, last_rel + med_delta)) + offset
+            flush(final=True)
         proc.stdin.close()
     except (BrokenPipeError, OSError):
         proc.wait()

@@ -779,8 +779,12 @@ class Project:
                 removed = bool(v.get("removed"))
                 extended = bool(v.get("extended")) and not removed
                 if removed or extended:
-                    clean[str(int(k))] = {"removed": removed,
-                                          "extended": extended}
+                    e = {"removed": removed, "extended": extended}
+                    # only "next" is recorded: leaving the default off keeps
+                    # marks made by older versions reading identically
+                    if removed and v.get("fill") == "next":
+                        e["fill"] = "next"
+                    clean[str(int(k))] = e
             sec["edits"] = clean
             sec["check"] = None    # edits changed; old verdict is stale
             self._stale_neighbour_checks(sec)
