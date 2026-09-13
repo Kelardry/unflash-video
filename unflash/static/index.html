@@ -25,6 +25,8 @@
   </label>
   <button id="btnScan" disabled>Scan for flashes</button>
   <button id="btnExport" disabled>Export…</button>
+  <div id="buildStamp" class="build" title="When the code this server is running was last changed. Unflash does not reload a running server, so if this is older than an update you were sent, use Quit and start it again."></div>
+  <button id="btnQuit" title="Stop Unflash properly. Closing the browser leaves it running in the background, and an update will not take effect until it has actually stopped.">Quit</button>
 </header>
 
 <div id="banner" class="banner hidden">
@@ -188,6 +190,7 @@
       </select>
     </label>
     <p id="exportPlan" class="hint"></p>
+    <p id="exportExisting" class="hint"></p>
     <div class="modal-actions">
       <button id="btnDoExport" class="primary">Choose output & export</button>
       <button id="btnVerifyExport">Verify exported file</button>
@@ -197,6 +200,15 @@
   </div>
 </div>
 
+<div id="quitScreen" class="quitscreen hidden">
+  <div>
+    <h2>Unflash has stopped.</h2>
+    <p id="quitDetail"></p>
+    <p class="hint">You can close this tab. Run <code>run_unflash.bat</code>
+      to start it again.</p>
+  </div>
+</div>
+<div id="staleBanner" class="stale hidden"></div>
 <div id="toast" class="toast hidden"></div>
 
 <script src="/static/app.js"></script>

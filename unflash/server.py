@@ -15,6 +15,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 
 from flask import (Flask, Response, jsonify, redirect, request, send_file,
@@ -107,12 +108,41 @@ def _check_token():
     return Response(BLOCKED_HTML, status=403, mimetype="text/html")
 
 
+def source_stamp():
+    """Newest modification time across the code the server runs on.
+
+    A running server holds the modules it imported at startup, and launching
+    Unflash again does not start a new one -- it finds this one and just
+    reopens the browser (see instance.find_own). So after the code on disk
+    changes, the app goes on behaving exactly as it did before, with no sign
+    that anything is out of date. Comparing this against the value taken at
+    startup is what turns that into something the app can say out loud.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    newest = 0.0
+    for root, dirs, files in os.walk(here):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in files:
+            if f.endswith((".py", ".js", ".html", ".css")):
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(root, f)))
+                except OSError:
+                    pass
+    return round(newest, 3)
+
+
+STARTED_WITH = source_stamp()
+
+
 @app.get("/api/instance")
 def instance_info():
     """Reached only with a valid token, so a 200 here means "this server is
     yours" — that is how a second launch finds its own server."""
+    now = source_stamp()
     return jsonify({"unflash": True, "pid": os.getpid(),
-                    "port": INSTANCE.get("port")})
+                    "port": INSTANCE.get("port"),
+                    "started_with": STARTED_WITH, "source_now": now,
+                    "stale": now > STARTED_WITH + 0.5})
 
 
 # --- static ------------------------------------------------------------------
@@ -761,6 +791,55 @@ def verify_export():
     return jsonify({"job": job.id})
 
 
+@app.post("/api/quit")
+def quit_server():
+    """Shut this server down for real.
+
+    Closing the browser leaves the server running, and launching Unflash
+    again finds that server rather than starting a new one -- so after an
+    update the app goes on behaving exactly as the old version did. Asking
+    people to find a python process in Task Manager is not a reasonable
+    answer, so the app can end itself.
+
+    Only this process is touched: the server ends itself and the ffmpeg
+    children it started. Anything else running on the machine, including
+    another account's Unflash, is none of its business.
+
+    Work in progress is not thrown away silently -- a request with jobs
+    running comes back 409 with their names, and only `force` goes ahead.
+    """
+    srv = INSTANCE.get("server")
+    if srv is None:
+        # reached without main() having started a server -- a test client, or
+        # an embedded use. There is no loop to stop, and ending the process
+        # out from under whatever is hosting us would not be ours to do.
+        return _err("This Unflash is not running as a server, so there is "
+                    "nothing to stop.", 409)
+    data = request.get_json(silent=True) or {}
+    busy = jobs.active()
+    if busy and not data.get("force"):
+        return _err("Still working: "
+                    + ", ".join(j.name for j in busy)
+                    + ". Quitting now would stop them part-way.", 409)
+    for j in busy:
+        j.cancel()          # the ffmpeg each one drives is terminated with it
+
+    # a dead server must not be found by the next launch
+    if INSTANCE.get("token"):
+        instance.save_state(port=None, pid=None)
+
+    def stop():
+        # let the jobs notice they were cancelled and tear their ffmpeg down
+        for _ in range(40):
+            if not jobs.active():
+                break
+            time.sleep(0.25)
+        srv.shutdown()              # serve_forever returns, main() exits
+
+    threading.Thread(target=stop, daemon=True, name="quit").start()
+    return jsonify({"quitting": True, "stopped": [j.name for j in busy]})
+
+
 # --- jobs --------------------------------------------------------------------
 
 @app.get("/api/job/<jid>")
@@ -837,6 +916,20 @@ def main(argv=None):
         if own:
             url = f"http://{args.host}:{own}/"
             print(f"Unflash is already running for this account at {url}")
+            # Whether that server is out of date has to be decided
+            # here, from the state file and the disk -- not from what the
+            # server reports. A server old enough to matter is also old
+            # enough to predate the reporting, and would answer that all is
+            # well. A missing stamp is itself the answer.
+            was = instance.load_state().get("source_stamp")
+            now = source_stamp()
+            if not isinstance(was, (int, float)) or now > was + 0.5:
+                print("WARNING: Unflash has been updated since that server "
+                      "started, and launching again does not reload it -- "
+                      "this just reopened the browser on the old one. Close "
+                      "Unflash completely (end the python process) and start "
+                      "it again, or it will go on behaving exactly like the "
+                      "version you replaced.")
             if args.video:
                 err = instance.post(args.host, own, token, "/api/open",
                                     {"path": os.path.abspath(args.video)})
@@ -854,9 +947,11 @@ def main(argv=None):
     else:
         ports = instance.candidate_ports(args.host, instance.DEFAULT_PORT)
     srv, port = _bind(args.host, ports)
-    INSTANCE.update({"token": token, "port": port, "host": args.host})
+    INSTANCE.update({"token": token, "port": port, "host": args.host,
+                     "server": srv})
     if token:
-        instance.save_state(host=args.host, port=port, pid=os.getpid())
+        instance.save_state(host=args.host, port=port, pid=os.getpid(),
+                            source_stamp=STARTED_WITH)
 
     url = f"http://{args.host}:{port}/"
     print(f"Unflash running at {url}")
@@ -878,6 +973,12 @@ def main(argv=None):
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    # however it ended -- Quit, Ctrl+C, a closed console -- the recorded port
+    # must not outlive the process, or the next launch hands the browser to
+    # something that is no longer listening
+    if token:
+        instance.save_state(port=None, pid=None)
+    print("Unflash has stopped.")
     return 0
 
 

@@ -384,9 +384,18 @@ function violationLines(res) {
 // Verdict on a rendered section, as a sentence: the count, then where.
 function renderVerdict(head, verdict) {
   const v = verdict || {};
+  if (v.short_by) {
+    return `${head} — but the file stopped ${v.short_by} picture(s) short of `
+      + `the section, so this verdict only covers part of it. Render again.`;
+  }
   if (v.safe) return `${head} — passes the detector ✓`;
-  return `${head} — still FAILS the detector (${violationPhrase(v)}): `
+  let msg = `${head} — still FAILS the detector (${violationPhrase(v)}): `
     + violationLines(v).join("; ");
+  if ((v.flagged_frames || []).length) {
+    msg += `. "Select unsafe frames" will highlight the `
+      + `${v.flagged_frames.length} frames behind it.`;
+  }
+  return msg;
 }
 
 // "2 WCAG violation window(s) + 1 extended flash" — extended flashes are only
@@ -995,22 +1004,39 @@ $("btnSelectFlagged").onclick = () => {
   updateGridClasses();
 };
 
+// The frames behind whatever is currently failing. The check is asked first
+// — it is the thing you are editing against — but a render can fail a section
+// the check passed, and then the times on their own leave you scrubbing a
+// thirty-second section hunting for something a second long. So the rendered
+// verdicts can answer too.
+function unsafeFrames() {
+  const sec = state.section || {};
+  const sources = [["check", sec.check],
+                   ["full render", (sec.render || {}).verdict],
+                   ["preview", (sec.preview || {}).verdict]];
+  for (const [name, v] of sources) {
+    if (v && !v.safe && (v.flagged_frames || []).length) {
+      return { frames: v.flagged_frames, from: name };
+    }
+  }
+  return { frames: [], from: null };
+}
+
 function updateUnsafeBtn() {
-  const check = state.section && state.section.check;
-  const frames = (check && !check.safe && check.flagged_frames) || [];
-  $("btnSelectUnsafe").classList.toggle("hidden", frames.length === 0);
+  $("btnSelectUnsafe").classList.toggle("hidden",
+                                        unsafeFrames().frames.length === 0);
 }
 
 $("btnSelectUnsafe").onclick = () => {
-  const check = state.section && state.section.check;
-  const frames = (check && check.flagged_frames) || [];
+  const { frames, from } = unsafeFrames();
   if (!frames.length) return;
   state.selection = new Set(frames);
   state.anchor = frames[0];
   updateGridClasses();
   const cell = $("frameGrid").children[frames[0]];
   if (cell) cell.scrollIntoView({ behavior: "smooth", block: "center" });
-  toast(`Selected ${frames.length} frames inside the failing window(s).`);
+  toast(`Selected ${frames.length} frames inside the failing window(s), `
+        + `from the ${from} verdict.`);
 };
 
 document.addEventListener("keydown", (ev) => {
@@ -1257,6 +1283,8 @@ $("btnPreview").onclick = () => {
   api(`/api/section/${sid}/preview`, "POST", {})
     .then((r) => pollJob(r.job, "Rendering preview", (res) => {
       const safe = res.verdict && res.verdict.safe;
+      if (state.section) state.section.preview = res;
+      updateUnsafeBtn();
       toast(renderVerdict("Preview rendered", res.verdict), !safe);
       api(`/api/section/${sid}`).then((d) => {
         state.section = d.section;
@@ -1271,6 +1299,8 @@ $("btnRender").onclick = () => {
   api(`/api/section/${sid}/render`, "POST", {})
     .then((r) => pollJob(r.job, "Rendering full resolution", (res) => {
       const safe = res.verdict && res.verdict.safe;
+      if (state.section) state.section.render = res;
+      updateUnsafeBtn();
       let msg = renderVerdict("Full render complete", res.verdict);
       if (res.warning) msg += ` (${res.warning})`;
       toast(msg, !safe);
@@ -1296,6 +1326,25 @@ $("btnExport").onclick = () => {
     (secs.length ? lines.join("<br>") : "No sections.") +
     "<br><br>Every section must be rendered at full resolution (and ideally ✓ safe) before export.";
   $("exportResult").textContent = "";
+  // Verifying reads a file that already exists; it does not export again.
+  // That is not obvious from a dialog called "Export", and an export of a
+  // feature-length video is not something to repeat by accident.
+  const exp = p.export || {};
+  const ex = $("exportExisting");
+  const had = !!exp.path;
+  $("btnVerifyExport").disabled = !had;
+  if (!had) {
+    ex.textContent = "No export on record yet. “Verify exported "
+      + "file” becomes available once one has been made.";
+  } else {
+    const v = exp.verify;
+    const said = !v ? "not verified yet"
+      : v.safe ? "last verify: passed" + String.fromCharCode(32, 10003)
+      : "last verify: FAILED (" + violationPhrase(v) + ")";
+    ex.textContent = "Already exported to " + exp.path + " — " + said
+      + ". “Verify exported file” re-scans that file; it does not "
+      + "export again.";
+  }
   $("exportModal").classList.remove("hidden");
   refreshExportPlan();
 };
@@ -1355,8 +1404,11 @@ $("btnVerifyExport").onclick = async () => {
       const shown = res.flag_extended ? wcag.concat(ext) : wcag;
       shown.sort((a, b) => a.start - b.start);
       let txt;
+      const build = res.build
+        ? ` [build ${new Date(res.build * 1000).toLocaleString()}]` : "";
       if (res.safe) {
-        txt = `✓ Exported file passes the detector (profile: ${res.profile}).`;
+        txt = `✓ Exported file passes the detector (profile: ${res.profile})`
+          + `${build}.`;
       } else {
         // `where` is worked out server-side from the layout the export
         // recorded, not by looking the time up on the source timeline: the
@@ -1386,8 +1438,8 @@ $("btnVerifyExport").onclick = async () => {
           return `  • ${kindLabel(x.kind)} ${violationWhere(x)} — ${where}`
             + marginNote(x);
         });
-        txt = `✗ Exported file still fails (profile: ${res.profile}):\n`
-          + rows.join("\n");
+        txt = `✗ Exported file still fails (profile: ${res.profile})`
+          + `${build}:\n` + rows.join("\n");
         const inSection = shown.filter((x) => x.where && x.where.section != null);
         if (shown.some((x) => x.where && x.where.section == null)) {
           txt += "\nTimes no section covers need one: add a section over "
@@ -1431,7 +1483,65 @@ $("btnVerifyExport").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
+// ---------- quitting ----------
+// Closing the browser leaves the server running, and the next launch finds it
+// rather than starting fresh -- so an update silently does nothing until the
+// process has actually gone. This is the button that makes that possible
+// without asking anyone to go looking in Task Manager.
+async function quitUnflash(force) {
+  try {
+    const r = await api("/api/quit", "POST", force ? { force: true } : {});
+    const stopped = (r && r.stopped) || [];
+    $("quitDetail").textContent = stopped.length
+      ? `Stopped part-way through: ${stopped.join(", ")}.`
+      : "Nothing was in progress.";
+    $("quitScreen").classList.remove("hidden");
+  } catch (e) {
+    // 409 means work is running and we have not been told to stop it
+    if (/Still working/.test(e.message)) {
+      if (confirm(e.message + "\n\nStop them and quit anyway?")) {
+        await quitUnflash(true);
+      }
+      return;
+    }
+    toast(e.message, true);
+  }
+}
+
+$("btnQuit").onclick = () => {
+  if (!confirm("Stop Unflash?\n\nYour project is saved as you go, so "
+               + "nothing is lost. Use this rather than just closing the tab "
+               + "- especially after an update, which cannot take effect "
+               + "until Unflash has really stopped.")) return;
+  quitUnflash(false);
+};
+
+// ---------- is this server running the code that is on disk? ----------
+// Launching Unflash again finds the server already running and only reopens
+// the browser, so an edited file changes nothing until that process is
+// stopped. Silently running old code cost a full day of chasing a bug that
+// had already been fixed; say so instead.
+async function checkServerFreshness() {
+  try {
+    const info = await api("/api/instance");
+    const stamp = $("buildStamp");
+    if (stamp && info && info.started_with) {
+      stamp.textContent = "build "
+        + new Date(info.started_with * 1000).toLocaleString();
+    }
+    const el = $("staleBanner");
+    if (!el) return;
+    if (!info || !info.stale) { el.classList.add("hidden"); return; }
+    const when = new Date(info.source_now * 1000).toLocaleString();
+    el.textContent = "This server started before the code it is running was "
+      + `last changed (${when}), and launching Unflash again does not reload `
+      + "it \u2014 close Unflash completely, then start it again.";
+    el.classList.remove("hidden");
+  } catch (e) { /* not fatal: the app works, it may just be out of date */ }
+}
+
 // ---------- boot ----------
 window.addEventListener("resize", () => { if (state.project) drawTimeline(); if (state.section && state.section.prepared) drawChart(); });
 refreshProject().catch(() => {});
 resumeActiveJobs();
+checkServerFreshness();

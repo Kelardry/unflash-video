@@ -23,6 +23,21 @@ run_unflash.bat
 
 A browser page opens at http://127.0.0.1:8765/. Everything runs locally.
 
+**After updating the code, use the Quit button before starting Unflash
+again.** Closing the browser tab is not enough. Running
+`run_unflash.bat` a second time does not start a second server: it finds
+the one already running for your account and just reopens the browser on
+it (see "Several people signed in to one PC" below). That server is
+still holding the modules it imported when it started, so an updated
+file changes nothing until the process is gone.
+
+**Quit** (in the header) stops it properly: it asks first if a render or
+export is still running, cancels what it stops, and frees the port so
+the next launch starts fresh. The header also shows the date of the code
+the running server loaded, and a red banner appears if the files on disk
+are newer than that -- if you ever suspect an update has not taken, read
+the build date rather than guessing.
+
 ### Several people signed in to one PC
 
 Each account gets its own server, because a server's file dialogs and browse
@@ -178,6 +193,27 @@ things hold at once in some 341×256 window (content viewed at 1024×768):
    (coherence — a dark limb swinging over a bright background flicks
    individual pixels while the region's overall brightness barely moves).
 
+### How the 1024×768 reference is applied to other shapes
+
+WCAG's thresholds are defined for content filling a 1024×768 field of view —
+the 341×256 window is a tenth of *that* screen, standing in for the central
+ten degrees of vision. Real video is rarely 4:3, and the standard does not
+say what to do about it, so this is a judgement call and worth stating
+plainly.
+
+Unflash fits the frame inside the 1024×768 box by whichever dimension runs
+out first, and scales the window with it. So 4:3 content becomes 1024×768 and
+the window covers 33% × 33% of the picture; 16:9 content becomes 1024×576 and
+the window covers 33% × **44%**. The reading behind that is that a viewer
+sits so the picture's *width* fills their field of view, and a widescreen
+frame is simply shorter.
+
+The consequence is worth knowing: on widescreen content, flashing has to
+cover a taller share of the frame to be flagged than the same flashing would
+on 4:3. If you would rather err the other way, fitting by height instead
+(1365×768 for 16:9, window 25% × 33%) would flag more — change `screen_w` /
+`screen_h` in the detector profile, or ask and it can be made a setting.
+
 Calibrated against synthetic patterns (tests/): exactly 3 flashes/s passes
 WCAG, 4 fails; 15% window area passes, 35% fails; bright-only flicker
 passes; jittered multi-frame ramps fail; moving boxes, slow pans over
@@ -265,6 +301,25 @@ it; they show as unchecked until you re-check.
 Sections prepared by an earlier version have no cached run-up. They still
 check, but cold — the check says so, and preparing them again fixes it.
 
+**A rendered file has to be read by its pictures, not by its frames.** A
+section is written onto a constant-rate grid, so a 24 fps section comes back
+at 120 fps with every picture written five times over. The hazard tests ask
+whether enough of the picture is flashing *at this instant*, so reading that
+file frame by frame asks five times as often as the check did -- and finds
+instants the check stepped over. That was the whole of a run of "passes the
+check, fails the preview" reports on 1080p footage: identical pictures at
+identical times, different sampling, opposite verdicts.
+
+Spotting the repeats by comparing frames does not undo it. They are not
+identical by the time they come back: x264 codes the first copy of a picture
+roughly and refines it over the copies that follow, so the later copies drift
+away from the first a little more each time, and on a 1080p render only about
+one repeat in seven survives as an exact match. So a rendered section is read
+at the times its own pictures go up, one frame each -- the sequence the check
+reasons about, with the pixels the render actually produced. A verify pass
+over the finished export does the same through each section and takes the
+untouched spans as they come, since those keep the source's rate.
+
 **A run-up only works if the detector's memory is finite.** It was not.
 The per-pixel tracker accumulates one monotonic run so that a flash ramping
 over a few frames still counts as a single transition, and until the pixel
@@ -324,9 +379,15 @@ check its source footage passed.)
 The render grid is chosen to carry the source's timing exactly where it can:
 100 slots a second divides 25 and 50, 120 divides 24, 30 and 60. The
 1000/1001 rates (23.976, 29.97, 59.94) divide neither and keep a residual of
-half a slot, about 4 ms, as does any variable-rate source; that moves the
-times a verify reports by a few milliseconds but has not been seen to change
-a verdict. Where the source crowds two frames onto one slot -- a timestamp
+half a slot, about 4 ms, as does any variable-rate source. That is not
+harmless: the failure test counts flashes inside a hard one-second
+window, so a few milliseconds can decide whether the fourth flash falls
+inside it, and reading a rendered section on the file's own grid rather
+than on the timeline it was built to did fail sections that had passed
+their own checks. Everything that reads a render back therefore stamps
+each frame with its picture's time (see editing.pick_pictures), which is
+the timeline the check, the render verdict and the export verify all
+share. Where the source crowds two frames onto one slot -- a timestamp
 anomaly putting a pair microseconds apart, which ordinary stream VODs do
 contain -- both are still written, one borrowing a slot that the next frame
 with room hands back, so a marked frame never silently fails to reach the

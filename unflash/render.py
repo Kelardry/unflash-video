@@ -24,14 +24,15 @@ from dataclasses import asdict
 import numpy as np
 
 from . import ffio
-from .analysis import analyze_file
+from .analysis import analyze_frames
 # section_timeline is the one account of where a section begins, what it
 # shows and when. The renderer, the exporter and the safety check all read
 # it, so they cannot disagree: a check reasoning about a slightly different
 # span than the one that gets written is a check that can pass footage the
 # export then fails.
 from .editing import (analyze_rendered_section, cache_shift,
-                      section_timeline, replacement_map)
+                      section_timeline, replacement_map,
+                      edited_sequence, shown_pts)
 from .ffio import FFMPEG, FFError, CREATE_NO_WINDOW
 
 # Every part handed to the concat demuxer must share one mp4 timescale. With
@@ -366,6 +367,15 @@ def render_section(project, sid, source, out_path, job=None,
         verdict["profile"] = _profile_name(project)
         verdict["detector_sig"] = _detector_sig(project)
         verdict["after"] = [asdict(v) for v in after]
+        verdict["flagged_frames"] = getattr(res, "flagged", [])
+        short = getattr(res, "missing", 0)
+        if short:
+            verdict["short_by"] = short
+            notes.append(
+                f"The rendered file ran out {short} picture(s) before the "
+                "section's timeline does, so this verdict only covers the "
+                "part of the section it reached. Render it again.")
+            warn = " ".join(notes)
 
     entry = {"path": out_path, "verdict": verdict, "warning": warn,
              "source": source, "grid_fps": grid,
@@ -387,6 +397,23 @@ def _unlink(path):
 def _profile_name(project):
     from .config import profile_name
     return profile_name(project.data["detector"])
+
+
+def build_stamp():
+    """When the code that produced a verdict was last changed.
+
+    Recorded on every verify. A verdict outlives the session that made it and
+    gets pasted into a message hours later, and "which version was this?" has
+    twice been the whole answer to a bug report -- once because a running
+    server was holding code from before a fix, once because it was not clear
+    whether a result had been re-run at all. Carrying the answer with the
+    verdict costs nothing and settles it without another round trip.
+    """
+    try:
+        from .server import source_stamp
+        return source_stamp()
+    except Exception:      # noqa: BLE001 - advisory only, never fatal
+        return None
 
 
 def _detector_sig(project):
@@ -1108,15 +1135,119 @@ def locate_violations(project, verdict):
     return verdict
 
 
+def _export_sampling(project):
+    """Where in an exported file the pictures are, span by span.
+
+    An export is not one constant frame rate: each section was written onto
+    its own grid and so carries every picture three to five times over, while
+    the untouched spans between them keep the source's rate. Reading the
+    whole file frame by frame therefore samples the sections several times as
+    often as the spans around them -- and several times as often as the check
+    that passed them -- which is enough on its own to fail a section that was
+    checked safe (see editing.picture_frames).
+
+    Returns a list of (start, end, times or None); `times` is the export-time
+    moment each of a section's pictures goes up, and None means take the span
+    as it comes. None overall when the layout is not known well enough to say.
+    """
+    layout = (project.data.get("export") or {}).get("layout") \
+        or _infer_layout(project)
+    if not layout:
+        return None
+    ext = project.render_config.extension_seconds
+    spans = []
+    for span in layout:
+        sid = span.get("section")
+        times = None
+        if sid is not None:
+            try:
+                sec = project.section(sid)
+                seq = edited_sequence(shown_pts(sec), sec.get("edits"), ext)
+                times = [span["start"] + t for t, _ in seq]
+            except Exception:      # noqa: BLE001 - a section
+                # that cannot be read just gets taken as it comes
+                times = None
+        spans.append((span["start"], span["end"], times))
+    return spans
+
+
+def _verify_frames(project, path, cfg, aw, ah, cancel=None):
+    """The exported file read back the way it was put together: every frame
+    of the untouched spans, and each section's own pictures on the timeline
+    that section was built to.
+
+    The picking is editing.pick_pictures' -- the same one a single rendered
+    section is read with, so a verify of the whole export and the check of
+    any section in it are measuring the same footage the same way.
+    """
+    spans = _export_sampling(project)
+    if spans is None:
+        yield from ffio.iter_frames(path, aw, ah, cancel=cancel)
+        return
+    i, j = 0, 0
+    prev = None
+    prev_k = used_k = -1
+    last_out = None
+    for k, (t, fr) in enumerate(ffio.iter_frames(path, aw, ah, cancel=cancel)):
+        # a frame at or past a span's end belongs to the next one: the
+        # boundary is shared, and letting a frame sit on both sides of
+        # it puts the section's first picture a hair behind the last
+        # frame of the span before, which reads as a timestamp going
+        # backwards and gets bridged as a source anomaly
+        while i < len(spans) and t >= spans[i][1] - 1e-9:
+            i += 1
+            j = 0
+        want = spans[i][2] if i < len(spans) else None
+        if want is None:
+            # A section's last picture and the first frame of the span after
+            # it can land on the very same instant -- the parts meet there.
+            # Two frames claiming one moment is a zero-length step, which the
+            # clock reads as a source timestamp anomaly and bridges; the
+            # section's picture is the one on its own timeline, so the
+            # duplicate from the span after it is the one to drop.
+            if last_out is not None and t <= last_out + 1e-9:
+                prev, prev_k = (t, fr), k
+                continue
+            yield t, fr
+            used_k, last_out = k, t
+        elif j < len(want) and t + 1e-9 >= want[j]:
+            if (prev is not None and prev_k != used_k
+                    and abs(prev[0] - want[j]) < abs(t - want[j])):
+                yield want[j], prev[1]
+                used_k = prev_k
+            else:
+                yield want[j], fr
+                used_k = k
+            last_out = want[j]
+            j += 1
+        prev, prev_k = (t, fr), k
+
+
 def verify_file(project, path, job=None):
     """Full detector pass over an arbitrary rendered file, using the
-    project's currently selected detector profile."""
+    project's currently selected detector profile.
+
+    The file is read picture by picture through its sections rather than
+    frame by frame, so this and the per-section checks are measuring the same
+    footage sampled the same way (see _export_sampling).
+    """
     cfg = project.detector_config
-    res = analyze_file(
-        path, cfg,
+    info = project.data["info"]
+    aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
+    total = None
+    try:
+        total = max(1, int((ffio.stream_duration(path) or 0)
+                           * (info.get("fps") or 30))) or None
+    except (OSError, ValueError):
+        pass
+    res = analyze_frames(
+        _verify_frames(project, path, cfg, aw, ah,
+                       cancel=(job.cancelled if job else None)),
+        cfg, aw, ah,
         progress=(lambda p: job.set_progress(p, "verifying")) if job else None,
-        cancel=(job.cancelled if job else None))
+        total_hint=total, cancel=(job.cancelled if job else None))
     out = res.to_dict()
     out["profile"] = _profile_name(project)
     out["detector_sig"] = _detector_sig(project)
+    out["build"] = build_stamp()
     return out

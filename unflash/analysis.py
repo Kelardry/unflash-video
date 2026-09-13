@@ -63,6 +63,39 @@ from . import ffio
 # of it from twenty-six seconds earlier.
 MAX_RUN_SECONDS = 2.0
 
+# How much of the picture has to move before a frame counts as showing
+# something new, as a fraction of the area a flash has to cover.
+#
+# A picture that is merely being held on screen again is not a fresh
+# observation, and rendering produces a great many of them: a section is
+# written onto a constant-rate grid (render._pick_grid_fps), so each source
+# picture is repeated three to five times. Comparing frames for exact
+# equality only catches the repeats an encoder happened to code as skips --
+# measured on real 1080p renders, one in seven -- and the rest are counted
+# as observations in their own right. That is what let a section pass its
+# own check and then fail the render of the very same frames: the render
+# samples the hazard five times as often, so it catches peaks the check
+# steps over and stretches every burst by up to a frame.
+#
+# So "the same picture" is decided by how much of the picture has moved far
+# enough to be part of a flash: pixels whose luminance differs by more than
+# HELD_DELTA_RATIO of swing_threshold from the last frame that was *not*
+# held. Comparing against the last distinct frame rather than the previous
+# one is what keeps a slow ramp accumulating instead of being held for ever
+# -- but it also means an encoder's drift accumulates, which is why the bar
+# is on magnitude rather than on the tracker's own noise deadband. x264
+# codes the first copy of a new picture roughly and refines it over the
+# copies that follow, so the third copy can differ from the first across
+# hundreds of pixels while none of them has moved anywhere near a flash.
+#
+# Measured over 2417 known repeats in three rendered 1080p sections: drift
+# from the first copy of a picture moved at most two pixels past the delta,
+# while a genuine picture change moved a median of 4672 and a qualifying
+# flash has to move area_thresh (1360 here). Both margins are wide.
+HELD_DELTA_RATIO = 0.5      # of swing_threshold: well under a qualifying
+                            # swing, well over anything compression does
+HELD_AREA_RATIO = 0.10      # of the area a flash has to cover
+
 # --- sRGB -> linear lookup table -------------------------------------------
 _LUT = np.empty(256, np.float32)
 for _c in range(256):
@@ -284,13 +317,27 @@ def _bbox_overlap(a, b, frac=0.2):
     return amin > 0 and inter >= frac * amin
 
 
+# Every per-pixel *time* the detector keeps is float64, and that is not
+# incidental. These are positions on a clock that runs for the length of the
+# recording, and a float32 holding 4259 seconds resolves to a quarter of a
+# millisecond -- against comparisons like `(tc - last) <= area_accum_window`
+# where the window is 0.125 s and a 24 fps frame is 41.7 ms, so 0.125 lands
+# 2.997 frames back and a quarter-millisecond nudge decides whether a third
+# frame is still "just now". The upshot was a detector whose answers drifted
+# with how far into the file it was: a section checked on its own (clock near
+# zero) passed, and the identical frames at the identical times inside a
+# seventy-minute export failed. Every failure in that export was in its
+# second half. Keep these float64.
+TIME_DTYPE = np.float64
+
+
 class _Pool:
     """Pools per-pixel transition completions over a short time window, so a
     flash whose pixels complete on neighbouring frames is still one event."""
 
     def __init__(self, shape, window):
         self.window = window
-        self.time = np.full(shape, -1e12, np.float32)
+        self.time = np.full(shape, -1e12, TIME_DTYPE)
         self.pol = np.zeros(shape, np.int8)
 
     def add(self, mask, pol, tc):
@@ -321,15 +368,15 @@ class _FlashCounter:
 
     def __init__(self, shape, limit):
         self.K = int(np.floor(limit)) + 1
-        self.ring = np.full((self.K,) + shape, -1e12, np.float32)
+        self.ring = np.full((self.K,) + shape, -1e12, TIME_DTYPE)
         # when each of those flashes *opened* -- a flash is timed by its
         # closing transition, but the pair starts at the opening one, and
         # that earlier moment is what has to be inside a work section for
         # the section's edits to be able to remove the flash.
-        self.ring_open = np.full((self.K,) + shape, -1e12, np.float32)
-        self.last = np.full(shape, -1e12, np.float32)   # most recent flash
+        self.ring_open = np.full((self.K,) + shape, -1e12, TIME_DTYPE)
+        self.last = np.full(shape, -1e12, TIME_DTYPE)   # most recent flash
         self.pend_pol = np.zeros(shape, np.int8)
-        self.pend_t = np.full(shape, -1e12, np.float32)
+        self.pend_t = np.full(shape, -1e12, TIME_DTYPE)
 
     def transitions(self, mask, pol, tc):
         if not mask.any():
@@ -443,8 +490,12 @@ class FlashDetector:
         self._last_native = None
         self._clock = 0.0
         self._recent_dt = []
-        self._prev = None       # last picture fed, to spot held frames
-        self.held = 0           # frames that merely repeated it
+        self._prev_L = None     # luminance of the last frame not held
+        self.held = 0           # frames that only repeated the picture
+        # what makes a frame a new picture rather than a re-show of the last
+        # one: this much of it moved this far (see HELD_DELTA_RATIO)
+        self._held_delta = HELD_DELTA_RATIO * cfg.swing_threshold
+        self._held_bar = max(1.0, HELD_AREA_RATIO * self.area_thresh)
 
     def _window_sums(self, arr):
         """Sum of `arr` over every grid window position -> (gy, gx) array."""
@@ -477,24 +528,28 @@ class FlashDetector:
     def feed(self, t, frame):
         cfg = self.cfg
         tc = self._advance_clock(t)
-        # A picture merely held on screen is not a fresh observation. No
-        # pixel moved, so no transition can complete and no extremum can
-        # turn: tracking it would leave every tracker as it was, and the only
-        # thing it could still do is re-report the flashing of the frame it
-        # repeats, one frame-time later than that frame.
+        lin = _LUT[frame]                       # HxWx3 float32, linear
+        R, G, B = lin[..., 0], lin[..., 1], lin[..., 2]
+        L = 0.2126 * R + 0.7152 * G + 0.0722 * B
+
+        # A picture merely being held on screen again is not a fresh
+        # observation. Nothing the tracker reacts to has moved, so no
+        # transition can complete -- and the only thing tracking it could
+        # still do is re-report the flashing of the frame it repeats, one
+        # frame-time later than that frame.
         #
-        # That matters because held frames are not rare. Rendering re-times
-        # a section onto a constant-rate grid (see render._pick_grid_fps),
-        # repeating each source picture three or four times, so a rendered
-        # section re-reports every hazard for up to a source frame longer
-        # than the same footage does when it is checked -- which is enough
-        # for a section its own check calls safe to fail after rendering.
-        # Removals hold a frame too, and so do plenty of capture sources.
+        # Held frames are not rare: rendering re-times a section onto a
+        # constant-rate grid and repeats every picture three to five times,
+        # a removal holds the frame before it, and animation holds drawings
+        # for two and three frames at a time. See HELD_AREA_RATIO for how
+        # "the same picture" is decided and why it cannot be exact equality.
         #
         # The clock still advances: the picture really was on screen for
         # that long, and the time it occupies has to count against the
         # sustained-flashing windows like any other quiet moment.
-        if self._prev is not None and np.array_equal(frame, self._prev):
+        if self._prev_L is not None and np.count_nonzero(
+                np.abs(L - self._prev_L) > self._held_delta
+                ) < self._held_bar:
             self.held += 1
             # the runs still age: time passes while a picture is held, and a
             # long still passage must not carry an old run across it
@@ -514,10 +569,9 @@ class FlashDetector:
             self.stat_haz_red_onset.append(tc)
             self.n += 1
             return
-        self._prev = frame.copy()
-        lin = _LUT[frame]                       # HxWx3 float32, linear
-        R, G, B = lin[..., 0], lin[..., 1], lin[..., 2]
-        L = 0.2126 * R + 0.7152 * G + 0.0722 * B
+        # compared against the last frame that was not held, so a drift too
+        # slow to trip the bar in one step still trips it eventually
+        self._prev_L = L
         total = R + G + B
         sat = (total > 1e-5) & (R >= cfg.red_saturation * total)
         V = np.maximum(R - G - B, 0.0) * 320.0

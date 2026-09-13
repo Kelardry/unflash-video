@@ -855,6 +855,83 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
     }
 
 
+def pick_pictures(frames, want):
+    """From a stream of (time, frame), the frame on screen at each moment in
+    `want` -- stamped with that moment, not with the file's own timestamp.
+
+    Both halves of that matter.
+
+    *One frame per picture*, because a render writes its section onto a
+    constant-rate grid (see render._pick_grid_fps) and a 24 fps section comes
+    back at 120 fps with every picture written five times over. Reading that
+    frame by frame samples the footage five times as often as the check does,
+    and the hazard tests ask whether enough of the picture is flashing at
+    this instant -- so asking five times as often finds instants the check
+    steps over.
+
+    *At the picture's own time*, because the grid can only place a picture to
+    the nearest slot, and 24000/1001 frames a second lands on 5.005 of them.
+    The intervals between pictures therefore come back jittered by up to half
+    a slot, and the failure test counts flashes inside a hard one-second
+    window: eight milliseconds decides whether the fourth flash falls inside
+    it. That is this program's own rounding, not something in the video, and
+    no edit can remove it -- it has to be measured on the timeline the
+    section was built to, or a section passes its check and fails the export
+    with nothing to fix.
+
+    The picture's first slot is its time rounded to the grid, so it can land
+    either side of it by half a slot; whichever of the two frames around it
+    is nearer is the one taken, and never a frame already handed out.
+    """
+    i = 0
+    prev = None
+    prev_k = used_k = -1
+    for k, (t, fr) in enumerate(frames):
+        if i >= len(want):
+            break
+        if t + 1e-9 >= want[i]:
+            if (prev is not None and prev_k != used_k
+                    and abs(prev[0] - want[i]) < abs(t - want[i])):
+                yield want[i], prev[1]
+                used_k = prev_k
+            else:
+                yield want[i], fr
+                used_k = k
+            i += 1
+        prev, prev_k = (t, fr), k
+
+
+def picture_frames(path, seq, aw, ah, cancel=None):
+    """A rendered section file read back as the pictures it was built from.
+
+    `seq` is the edited timeline from edited_sequence(). See pick_pictures
+    for why it is read this way rather than frame by frame.
+    """
+    yield from pick_pictures(ffio.iter_frames(path, aw, ah, cancel=cancel),
+                             [t for t, _ in seq])
+
+
+def flagged_frames(seq, violations):
+    """The ordinals of the frames inside failing windows.
+
+    A verdict that only gives times leaves you scrubbing a thirty-second
+    section looking for something a second long. These are the frames the
+    grid can select, so "show me the problem" has an answer. Spans run from
+    each violation's onset -- the first transition feeding it -- because the
+    frames that cause a failure start before the moment it is announced.
+    """
+    disp = [t for t, _ in seq]
+    out = set()
+    for v in violations:
+        lo = min(v.onset, v.start) if not isinstance(v, dict) \
+            else min(v.get("onset", v["start"]), v["start"])
+        hi = v.end if not isinstance(v, dict) else v["end"]
+        for i, t in enumerate(disp):
+            if lo - 0.05 <= t <= hi + 0.05:
+                out.add(i)
+    return sorted(out)
+
+
 def analyze_rendered_section(project, sid, path):
     """Detector pass over a rendered section file, with the same run-up and
     run-out its fast check uses.
@@ -863,24 +940,41 @@ def analyze_rendered_section(project, sid, path):
     blind spot at a higher cost: a rendered section can be pronounced safe
     and still be flashing in its opening second, which only shows up when the
     whole export is verified.
+
+    The file is read picture by picture rather than frame by frame -- see
+    picture_frames -- so this and the check disagree only where the render
+    really does differ from what was checked.
     """
     cfg = project.detector_config
     info = project.data["info"]
+    sec = project.section(sid)
+    ext_s = project.render_config.extension_seconds
     aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
-    ctx = section_context(project, sid)
+    ctx = section_context(project, sid, ext_s)
     det = FlashDetector(cfg, aw, ah)
     for t, fr in zip(ctx.lead_pts, ctx.lead):
         det.feed(t, np.ascontiguousarray(fr))
     end = 0.0
-    dt = _median_dt(project.section(sid).get("pts") or [])
-    for t, fr in ffio.iter_frames(path, aw, ah):
+    dt = _median_dt(sec.get("pts") or [])
+    seq = edited_sequence(shown_pts(sec), sec.get("edits"), ext_s)
+    seen = 0
+    for t, fr in picture_frames(path, seq, aw, ah):
         det.feed(t, fr)
         end = t
+        seen += 1
     for t, fr in zip(ctx.tail_pts, ctx.tail):
         det.feed(end + t, np.ascontiguousarray(fr))
     result = det.finish()
     inside, after, _, _ = _classify(result, end + dt * 0.5, ctx.next_at)
     result.violations = inside + after
+    # the frames behind the failure, so a render verdict can be acted on in
+    # the grid exactly like a check verdict
+    result.flagged = flagged_frames(seq, inside)
+    # The file is read at the times the section's pictures go up, so a file
+    # that does not go on as long as the timeline says quietly gets judged on
+    # the part of it that does. That is a verdict about less footage than the
+    # section holds, and saying "safe" about it would be a lie of omission.
+    result.missing = max(0, len(seq) - seen)
     return result, after
 
 
@@ -964,14 +1058,7 @@ def check_section(project, sid, edits=None):
 
     # map violation windows back to frame ordinals via the simulated
     # display timeline (extensions shift everything after them)
-    disp = [t for t, _ in seq]
-    flagged = set()
-    for v in inside:
-        lo = min(v.onset, v.start)
-        for i, t in enumerate(disp):
-            if lo - 0.05 <= t <= v.end + 0.05:
-                flagged.add(i)
-    verdict["flagged_frames"] = sorted(flagged)
+    verdict["flagged_frames"] = flagged_frames(seq, inside)
     # a violation that carries on past the section's last frame cannot be
     # cleared from inside it; say so rather than leaving the user to work out
     # why the frames on offer make no difference

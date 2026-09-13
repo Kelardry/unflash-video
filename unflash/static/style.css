@@ -206,6 +206,21 @@ video#player.dimmed { filter: brightness(.45); }
   border-radius: 10px; z-index: 99; max-width: 70vw; }
 .toast.error { border-color: var(--bad); color: var(--bad); }
 
+/* the running server is older than the code on disk: launching again does
+   not reload it, so this has to stay on screen until it is dealt with */
+.build { font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+
+/* shown once the server is gone: the page cannot do anything useful after
+   that, and saying so beats every button quietly failing */
+.quitscreen { position: fixed; inset: 0; z-index: 200; display: flex;
+  align-items: center; justify-content: center; text-align: center;
+  background: var(--bg1); }
+.quitscreen h2 { margin: 0 0 8px; }
+
+.stale { position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: var(--bad); color: #150c0c; font-weight: 600;
+  padding: 9px 16px; text-align: center; }
+
 /* export modal: what the selected assembly will do */
 .hint {
   margin: 6px 0 0;
