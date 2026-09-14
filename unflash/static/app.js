@@ -1323,8 +1323,7 @@ $("btnExport").onclick = () => {
     return `#${s.id} · ${fmtTime(s.start)}–${fmtTime(s.end)}: ${st}`;
   });
   $("exportSummary").innerHTML =
-    (secs.length ? lines.join("<br>") : "No sections.") +
-    "<br><br>Every section must be rendered at full resolution (and ideally ✓ safe) before export.";
+    secs.length ? lines.join("<br>") : "No sections.";
   $("exportResult").textContent = "";
   // Verifying reads a file that already exists; it does not export again.
   // That is not obvious from a dialog called "Export", and an export of a

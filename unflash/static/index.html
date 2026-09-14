@@ -181,7 +181,9 @@
 <div id="exportModal" class="modal hidden">
   <div class="modal-box">
     <h2>Export final video</h2>
-    <p id="exportSummary"></p>
+    <div id="exportSummary" class="scrollbox"></div>
+    <p class="hint">Every section must be rendered at full resolution (and
+      ideally ✓ safe) before export.</p>
     <label>Mode
       <select id="exportMode">
         <option value="reencode">Re-encode spans &middot; stream-copy join (lossless join, fastest)</option>
@@ -196,7 +198,7 @@
       <button id="btnVerifyExport">Verify exported file</button>
       <button id="btnCloseExport" class="small">close</button>
     </div>
-    <div id="exportResult"></div>
+    <div id="exportResult" class="scrollbox"></div>
   </div>
 </div>
 
