@@ -1435,10 +1435,24 @@ $("btnExport").onclick = () => {
   $("exportSummary").innerHTML =
     secs.length ? lines.join("<br>") : "No sections.";
   $("exportResult").textContent = "";
-  // Verifying reads a file that already exists; it does not export again.
-  // That is not obvious from a dialog called "Export", and an export of a
-  // feature-length video is not something to repeat by accident.
-  const exp = p.export || {};
+  renderExportExisting();
+  $("exportModal").classList.remove("hidden");
+  refreshExportPlan();
+};
+
+// Whether an export exists, and what the last verify of it said.
+//
+// Verifying reads a file that already exists; it does not export again.
+// That is not obvious from a dialog called "Export", and an export of a
+// feature-length video is not something to repeat by accident.
+//
+// This runs both when the dialog opens and when an export or a verify
+// finishes while it is open: the export record lives on state.project,
+// which an export does not by itself bring up to date, and gating the
+// verify button on a stale copy of it leaves the button dead in front of
+// a file the dialog has just said it wrote.
+function renderExportExisting() {
+  const exp = (state.project && state.project.export) || {};
   const ex = $("exportExisting");
   const had = !!exp.path;
   $("btnVerifyExport").disabled = !had;
@@ -1454,9 +1468,7 @@ $("btnExport").onclick = () => {
       + ". “Verify exported file” re-scans that file; it does not "
       + "export again.";
   }
-  $("exportModal").classList.remove("hidden");
-  refreshExportPlan();
-};
+}
 $("btnCloseExport").onclick = () => $("exportModal").classList.add("hidden");
 
 // how the selected assembly will run, and whether the part count forces
@@ -1500,6 +1512,11 @@ $("btnDoExport").onclick = async () => {
       for (const w of res.warnings || []) txt += `⚠ ${w}\n`;
       txt += 'Run "Verify exported file" to re-scan it.';
       $("exportResult").textContent = txt;
+      // the job result is the export record the project just saved; put
+      // it on state.project so the dialog (and the verify button) stop
+      // reading the state from before this export
+      if (state.project) state.project.export = res;
+      renderExportExisting();
       toast("Export complete: " + res.path, (res.warnings || []).length > 0);
     });
   } catch (e) { $("exportResult").textContent = e.message; toast(e.message, true); }
@@ -1588,6 +1605,12 @@ $("btnVerifyExport").onclick = async () => {
         }
       }
       $("exportResult").textContent = txt;
+      // the server stores this verdict on the export record; mirror it so
+      // reopening the dialog reports the verify that just ran
+      if (state.project && state.project.export) {
+        state.project.export.verify = res;
+        renderExportExisting();
+      }
     });
   } catch (e) { toast(e.message, true); }
 };
