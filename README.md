@@ -108,6 +108,12 @@ Note that two accounts opening the *same* video still share the one
    verifies it through the detector, and escalates until the section passes —
    tick *selection only* to confine its removals to the frames you selected;
    its proposals always fill from the previous frame.
+   **Suggest: reduce FPS** is the fallback for flashing the other two cannot
+   shift: it thins the section down to a frame rate the active profile
+   *cannot* fail, and decides purely from the frame timestamps — it never
+   looks at a picture. The button says which rate it will use; the **▾**
+   beside it opens a box to type a different one, with *safe rate* to put it
+   back. See *The safe frame rate*, below.
    Where a fill direction runs out it falls back the other way: removals at
    the very start of a section backfill from the first kept frame, and an
    **F** run at the very end holds the last kept frame before it.
@@ -259,6 +265,70 @@ Because extended flashes are not WCAG failures, verdicts distinguish them: a
 section or exported file whose only remaining problems are extended flashes
 still passes WCAG, and the UI says so while marking it unsafe for the
 active profile.
+
+### The safe frame rate
+
+Every profile has a frame rate below which it cannot report flashing at all,
+and **Suggest: reduce FPS** thins a section down to it. Nothing about the
+pictures enters into it — only the frame timestamps — so it is the option
+that works when keep-light and keep-dark run out of road: on flashing with
+no consistent bright or dark phase to hold, on a section where holding
+either phase destroys more than dropping to a slideshow would, and on
+sources whose frames arrive too unevenly for any fixed rule.
+
+The bound is arithmetic. A pixel's brightness run reverses at most once per
+frame, and a picture merely held on screen again is not looked at, so every
+qualifying transition needs a *new picture* and a flash — a pair of
+opposing transitions — needs two. Reaching `k` flashes therefore takes at
+least `2(k-1)` frame intervals between the first flash and the last. Fit
+fewer than that many intervals into a second and the verdict is unreachable,
+whatever the frames contain:
+
+| Profile | flashes needed | frame intervals | safe rate |
+| --- | --- | --- | --- |
+| **Exact WCAG + flag extended flashes** | 3 (extended, at the limit) | 4 | 3.8 /s |
+| **Exact WCAG only** | 4 (more than 3) | 6 | 5.71 /s |
+| **Stricter than WCAG** | 3 (more than 2) | 4 | 3.8 /s |
+
+The quoted rates are ~5% under the whole numbers the arithmetic gives (4/s
+and 6/s), because a render can only place a picture on the nearest slot of
+its 100- or 120-per-second grid and a gap read back off the file can be a
+slot shorter than the one the editor laid out. They are then rounded *down*
+to two decimals, so the figure on the button is the figure the guarantee was
+worked out for and "is this rate still safe?" is a plain comparison rather
+than a question about rounding.
+
+### Choosing a different rate
+
+The safe rate is a worst case: it assumes every picture is the exact opposite
+of the one before it, over a quarter of the screen, for as long as you like.
+Almost nothing looks like that, and most flashing footage passes at a good
+many more frames than the bound allows — so the **▾** beside the button opens
+a box to set the rate yourself, and **safe rate** puts it back.
+
+Above the safe rate the result stops being a promise and becomes a proposal
+like keep-light and keep-dark: it is still checked before it comes back, and
+the toast says which of the two you got. A rate at or under the safe one
+holds however you edit around it; one above it was judged on the frames as
+they were, so re-check the section if you change anything near it.
+
+A practical way to use it: run it at the safe rate to see the section go
+green, then raise the rate until it goes red and step back. Every run
+replaces the previous one's removals, so there is nothing to undo in between.
+
+The suggester keeps the first frame, then the next frame at least that far
+along *in time*, and so on. On a variable-rate source — a downloaded
+livestream that runs at 60 fps through the action and stalls for a second
+here and there — keeping every nth frame would give a different rate in
+every passage; keeping the next frame far enough along in time gives the
+same rate throughout, and takes nothing out of a stall that was already slow
+enough.
+
+With *selection only* ticked it thins just the selected frames. Frames
+outside the selection are left alone and still set the pace, so the first
+survivor inside the selection is spaced from whatever really precedes it —
+but the guarantee covers only the span you selected, and flashing carried by
+full-rate frames on either side of it will still be reported.
 
 ## Sections that close
 

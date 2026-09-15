@@ -22,9 +22,11 @@ from flask import (Flask, Response, jsonify, redirect, request, send_file,
                    send_from_directory, abort)
 
 from . import ffio, instance
-from .analysis import analyze_file, violations_to_sections, timeline_summary
+from .analysis import (analyze_file, violations_to_sections,
+                       timeline_summary, safe_picture_rate)
 from .config import profile_config, profile_name
-from .editing import prepare_section, suggest_edits, check_section
+from .editing import (prepare_section, suggest_edits, suggest_frame_rate,
+                      check_section, MAX_TARGET_FPS)
 from .jobs import JobManager
 from .project import Project, SectionNotFound, project_dir_video
 from .render import (render_section, export_video, verify_file,
@@ -328,6 +330,8 @@ def _project_payload():
     d["n_keyframes"] = len(p.data["keyframes"])
     d["bounds"] = list(p.bounds)
     d["profile"] = profile_name(p.data["detector"])
+    d["safe_fps"] = safe_picture_rate(p.detector_config)[0]
+    d["max_fps"] = MAX_TARGET_FPS
     d.pop("keyframes", None)
     return d
 
@@ -388,7 +392,8 @@ def update_settings():
     proj().update_settings(detector=data.get("detector"),
                            render=data.get("render"))
     return jsonify({"detector": proj().data["detector"],
-                    "render": proj().data["render"]})
+                    "render": proj().data["render"],
+                    "safe_fps": safe_picture_rate(proj().detector_config)[0]})
 
 
 # --- scan --------------------------------------------------------------------
@@ -665,6 +670,26 @@ def suggest(sid):
     job = jobs.start(f"suggest {sid}",
                      lambda job: suggest_edits(p, sid, prefer=prefer,
                                                only=only, job=job))
+    return jsonify({"job": job.id})
+
+
+@app.post("/api/section/<sid>/reduce_fps")
+def reduce_fps(sid):
+    p = proj()
+    data = request.get_json(force=True) or {}
+    only = data.get("only") or None
+    fps = data.get("fps")
+    if fps is not None:
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError):
+            return _err(f"{data['fps']!r} is not a frame rate", 400)
+        if not (0 < fps <= MAX_TARGET_FPS):
+            return _err(f"A target rate has to be between 0 and "
+                        f"{MAX_TARGET_FPS:g} pictures a second", 400)
+    job = jobs.start(f"reduce fps {sid}",
+                     lambda job: suggest_frame_rate(p, sid, only=only,
+                                                    fps=fps, job=job))
     return jsonify({"job": job.id})
 
 

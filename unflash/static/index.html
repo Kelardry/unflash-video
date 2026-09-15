@@ -99,6 +99,19 @@
         <span class="group">
           <button id="btnSuggestLight" title="Propose removals that hold the brighter frames">Suggest: keep light</button>
           <button id="btnSuggestDark" title="Propose removals that hold the darker frames">Suggest: keep dark</button>
+          <span class="split" id="fpsSplit">
+            <button id="btnSuggestFps">Suggest: reduce FPS <span id="fpsShown" class="rate"></span></button>
+            <button id="btnFpsMenu" class="split-arrow" aria-haspopup="true" aria-expanded="false" title="Change the rate to thin to">▾</button>
+            <div id="fpsMenu" class="menu fps-menu hidden">
+              <label for="fpsInput">Thin to</label>
+              <div class="fps-row">
+                <input type="text" id="fpsInput" inputmode="decimal" autocomplete="off" spellcheck="false">
+                <span class="fps-unit">pictures/s</span>
+                <button id="btnFpsSafe" class="small" title="Back to the fastest rate this profile cannot fail">safe rate</button>
+              </div>
+              <p id="fpsNote" class="fps-note"></p>
+            </div>
+          </span>
           <label class="sel-only" title="Restrict the suggestion's removals to the currently selected frames"><input type="checkbox" id="suggestSelOnly"> selection only</label>
         </span>
         <span class="group">
@@ -161,6 +174,7 @@
       <li>Open a video and <b>Scan</b> it — problem sections are found automatically (WCAG 2.x general-flash and red-flash analysis, plus extended flashes unless the profile is <i>Exact WCAG only</i>). You can also add sections by dragging on the timeline or typing timestamps.</li>
       <li>Open a section and <b>Prepare</b> it (proxy + thumbnails + per-frame analysis) — or use <b>prepare all</b> in the sidebar.</li>
       <li>Use <b>Suggest</b> (keep-light or keep-dark, optionally restricted to your selection) or mark frames yourself: a removed frame is replaced by the nearest kept frame — the one before it (<b>R</b>) or the one after it (<b>F</b>); extended frames linger for 1&nbsp;s with silent audio.</li>
+      <li><b>Suggest: reduce FPS</b> is the fallback when those cannot clear a section: it thins the frames down to a rate the active profile <i>cannot</i> fail, working from the frame timestamps alone — it never looks at a picture, so it handles flashing with no bright or dark phase to hold, and very uneven sources like stream captures. The button says the rate; the <b>▾</b> beside it sets a different one (the safe rate is a worst case, and most footage passes at many more frames), with <i>safe rate</i> to put it back.</li>
       <li><b>Check safety</b> instantly, then <b>Preview render</b> to watch the result. If a check fails, <b>select unsafe frames</b> shows you exactly where the remaining problems are.</li>
       <li><b>Render full-res</b> — this must be done for <b>every</b> section before exporting (<b>render all</b> in the sidebar does them all, skipping up-to-date ones). Sections whose edits changed after rendering are flagged <i>render stale</i>; re-render them.</li>
       <li><b>Export</b> stitches the rendered sections back into the untouched video, then <b>Verify</b> re-scans the final file.</li>

@@ -126,6 +126,28 @@ aside#sections {
   border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-size: 12px; }
 .sel-only { display: flex; align-items: center; gap: 4px; font-size: 12px;
   color: var(--fg-dim); }
+
+/* split button: the action, and an arrow opening the panel that sets what
+   the action will do. The panel hangs off the pair rather than off the
+   arrow so it can be wider than the arrow without being pushed off-centre,
+   and it is left-aligned so it does not run off a narrow window. */
+.split { position: relative; display: inline-flex; }
+.split > button:first-child { border-top-right-radius: 0;
+  border-bottom-right-radius: 0; border-right-width: 0; }
+.split > button.split-arrow { border-top-left-radius: 0;
+  border-bottom-left-radius: 0; padding: 6px 8px; }
+.split > button.split-arrow[aria-expanded="true"] { border-color: var(--accent); }
+.split .rate { color: var(--fg-dim); }
+.split > button:first-child:hover:not(:disabled) .rate { color: inherit; }
+.menu.fps-menu { right: auto; min-width: 250px; padding: 10px;
+  gap: 6px; font-size: 12px; }
+.fps-menu label { color: var(--fg-dim); }
+.fps-row { display: flex; align-items: center; gap: 6px; }
+.fps-row input { width: 5em; font-size: 12px; padding: 3px 6px; }
+.fps-row input.bad { border-color: var(--bad); }
+.fps-unit { color: var(--fg-dim); flex: 1; }
+.fps-note { margin: 0; color: var(--fg-dim); line-height: 1.35; }
+.fps-note.warn { color: var(--warn); }
 .grid-hint { color: var(--fg-dim); font-size: 11px; margin: -2px 0 8px; }
 
 #workspace { flex: 1; padding: 14px 18px; overflow-y: auto; min-width: 0; }

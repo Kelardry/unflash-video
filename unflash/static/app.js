@@ -15,6 +15,9 @@ const state = {
   saveTimer: null,
   activeJob: null,
   audioCtx: null,
+  safeFps: 0,           // rate below which the profile cannot report flashing
+  fps: 0,               // rate "reduce FPS" will thin to (editable)
+  maxFps: 1000,
 };
 
 // ---------- api ----------
@@ -174,6 +177,7 @@ async function refreshProject(openSid = null) {
     `${p.video_path.split(/[\\/]/).pop()} — ${info.width}×${info.height}, ` +
     `${info.fps.toFixed(2)} fps, ${fmtTime(bounds()[1] - bounds()[0])}`;
   if (p.profile) $("profileSel").value = p.profile;
+  setFpsHint(p.safe_fps, p.max_fps);
   $("timelineWrap").classList.remove("hidden");
   // the list first: it is what gets clicked, so it must not be left stale by
   // anything that goes wrong while drawing the timeline canvas
@@ -271,10 +275,28 @@ $("btnOpenProject").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
+// The rate below which "Suggest: reduce FPS" cannot fail comes out of the
+// detection profile, so it has to be re-read when the profile changes — and
+// a profile change does not reload the project. A changed safe rate also
+// resets the target: the number the user picked was chosen against the old
+// one, and silently keeping it would leave the button promising something
+// this profile does not.
+function setFpsHint(safeFps, maxFps) {
+  if (!safeFps) return;
+  if (maxFps) state.maxFps = maxFps;
+  if (safeFps !== state.safeFps) {
+    state.safeFps = safeFps;
+    state.fps = safeFps;
+    $("fpsInput").value = fmtRate(safeFps);
+  }
+  refreshFpsUi();
+}
+
 $("profileSel").onchange = async () => {
   try {
     const prof = $("profileSel").value;
     const r = await api("/api/settings", "POST", { profile: prof });
+    setFpsHint(r.safe_fps, r.max_fps);
     let msg = "Detection profile changed — re-scan, then use the sidebar's "
       + "'all sections' menu to re-prepare, re-check and refresh labels "
       + "under it without losing your edits.";
@@ -589,7 +611,7 @@ document.addEventListener("click", (ev) => {
   if (!ev.target.closest("#allMenu, #btnAllMenu")) closeAllMenu();
 });
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") closeAllMenu();
+  if (ev.key === "Escape") { closeAllMenu(); closeFpsMenu(); }
 });
 
 $("allMenu").onclick = (ev) => {
@@ -1199,7 +1221,10 @@ $("chart").onclick = (ev) => {
 };
 
 // ---------- suggest / check / render ----------
-function runSuggest(prefer) {
+// Every suggester returns the same thing — a set of removals for the frames
+// it was allowed to touch — so they share one caller. `path` and `body` pick
+// which one runs; `only` is filled in here from the selection checkbox.
+function runSuggester(path, body, label) {
   const sid = state.sectionId;
   const selOnly = $("suggestSelOnly").checked;
   let only = null;
@@ -1207,8 +1232,8 @@ function runSuggest(prefer) {
     if (!state.selection.size) { toast("'Selection only' is on but nothing is selected", true); return; }
     only = [...state.selection];
   }
-  api(`/api/section/${sid}/suggest`, "POST", { prefer, only })
-    .then((r) => pollJob(r.job, `Suggesting (keep ${prefer}${selOnly ? ", selection only" : ""})`, (res) => {
+  api(`/api/section/${sid}/${path}`, "POST", { ...body, only })
+    .then((r) => pollJob(r.job, `${label}${selOnly ? " (selection only)" : ""}`, (res) => {
       const merged = {};
       for (const [k, v] of Object.entries(state.edits)) {
         const idx = parseInt(k, 10);
@@ -1228,8 +1253,93 @@ function runSuggest(prefer) {
     }))
     .catch((e) => toast(e.message, true));
 }
+const runSuggest = (prefer) =>
+  runSuggester("suggest", { prefer }, `Suggesting (keep ${prefer})`);
 $("btnSuggestLight").onclick = () => runSuggest("light");
 $("btnSuggestDark").onclick = () => runSuggest("dark");
+
+// ---------- the reduce-FPS rate ----------
+// The safe rate is the fastest one that cannot fail whatever the frames
+// contain, so it assumes every picture is the opposite of the last. Most
+// footage is nothing like that and passes at a good deal more, which is why
+// the rate is editable at all — the panel sets what the button will do, and
+// the button says which rate that is.
+function fmtRate(v) {
+  return String(Math.round(v * 100) / 100);
+}
+
+function closeFpsMenu() {
+  $("fpsMenu").classList.add("hidden");
+  $("btnFpsMenu").setAttribute("aria-expanded", "false");
+}
+
+function refreshFpsUi() {
+  const raw = $("fpsInput").value.trim();
+  const v = raw === "" ? NaN : Number(raw);
+  const ok = Number.isFinite(v) && v > 0 && v <= (state.maxFps || 1000);
+  const safe = state.safeFps || 0;
+  $("fpsInput").classList.toggle("bad", !ok);
+  $("btnSuggestFps").disabled = !ok;
+  if (ok) state.fps = v;
+  $("fpsShown").textContent = ok ? `${fmtRate(v)}/s` : "";
+  const note = $("fpsNote");
+  if (!ok) {
+    note.textContent = `A rate between 0 and ${fmtRate(state.maxFps || 1000)}`
+      + " pictures a second.";
+    note.classList.add("warn");
+  } else if (v <= safe) {
+    note.textContent = `At or under ${fmtRate(safe)}/s no arrangement of`
+      + " frames can flash fast enough to fail this profile, so the result is"
+      + " safe by arithmetic — nothing about the pictures comes into it.";
+    note.classList.remove("warn");
+  } else {
+    note.textContent = `Above the guaranteed-safe ${fmtRate(safe)}/s. Keeps`
+      + " more of the motion, and usually still passes — but on these frames"
+      + " rather than on every possible arrangement of them, so the check"
+      + " after it is what decides.";
+    note.classList.add("warn");
+  }
+  $("btnSuggestFps").title = ok
+    ? `Propose removals that thin the frames down to ${fmtRate(v)} pictures a `
+      + "second, from their timestamps alone — the pictures themselves are "
+      + "never looked at, so it works on variable-frame-rate sources and on "
+      + "flashing the other suggesters cannot shift. "
+      + (v <= safe
+        ? `At or under ${fmtRate(safe)}/s this profile cannot report flashing `
+          + "at all. Use the arrow to keep more frames."
+        : `Above the guaranteed-safe ${fmtRate(safe)}/s — the check that `
+          + "follows decides. Use the arrow to go back to the safe rate.")
+    : "Enter a valid rate first (use the arrow).";
+}
+
+$("btnFpsMenu").onclick = () => {
+  const opened = $("fpsMenu").classList.toggle("hidden") === false;
+  $("btnFpsMenu").setAttribute("aria-expanded", String(opened));
+  if (opened) { $("fpsInput").focus(); $("fpsInput").select(); }
+};
+document.addEventListener("click", (ev) => {
+  if (!ev.target.closest("#fpsSplit")) closeFpsMenu();
+});
+$("fpsInput").oninput = refreshFpsUi;
+$("fpsInput").onkeydown = (ev) => {
+  if (ev.key === "Enter" && !$("btnSuggestFps").disabled) {
+    closeFpsMenu();
+    $("btnSuggestFps").click();
+  } else if (ev.key === "Escape") {
+    closeFpsMenu();
+    $("btnFpsMenu").focus();
+  }
+};
+$("btnFpsSafe").onclick = () => {
+  $("fpsInput").value = fmtRate(state.safeFps || 0);
+  refreshFpsUi();
+  $("fpsInput").focus();
+};
+$("btnSuggestFps").onclick = () => {
+  closeFpsMenu();
+  runSuggester("reduce_fps", { fps: state.fps },
+               `Reducing to ${fmtRate(state.fps)} pictures/s`);
+};
 
 $("btnCheck").onclick = () => {
   const sid = state.sectionId;

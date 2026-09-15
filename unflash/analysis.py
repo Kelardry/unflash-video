@@ -34,6 +34,7 @@ seeking/cutting uses), but flash-frequency windows run on an internal
 monotonic clock that bridges source timestamp discontinuities.
 """
 
+import math
 from dataclasses import dataclass, field, asdict
 
 import numpy as np
@@ -1000,6 +1001,90 @@ def context_seconds(cfg) -> float:
     if cfg.flag_extended:
         base = max(base, cfg.extended_window + cfg.extended_hold + 0.5)
     return base
+
+
+# Extra span asked of every flash window on top of the second the detector
+# measures against, so a rate-reduced section keeps its margin through the
+# render. The render writes a section onto a constant-rate grid of at least
+# 100 slots a second (render._pick_grid_fps) and a picture can only land on
+# the nearest slot, so a gap measured on the export can come back up to a
+# whole slot -- 10 ms -- shorter than the one the editor laid out.
+RATE_SAFETY_MARGIN = 0.05
+
+
+def flash_window_frames(cfg) -> int:
+    """How many frame intervals a burst of flashing needs to trip `cfg`.
+
+    Nothing here looks at pictures; this is a bound that falls out of how
+    flashes are counted, and it is what makes a purely timing-based edit
+    able to promise anything.
+
+    A pixel's monotonic run reverses at most once per frame (_ExtremaTracker
+    hands back `rev_up` and `rev_down` from a single `dir`, so they can never
+    both be set), and a picture merely held on screen again is not a fresh
+    observation at all (FlashDetector.feed returns early). So every
+    qualifying transition lands on a *distinct new picture*, and a flash --
+    a pair of opposing transitions, paired disjointly -- costs two of them.
+
+    A verdict needs `k` flashes inside a second, timed by their closing
+    transitions: the first closes on one picture, and the `k - 1` flashes
+    after it cost two pictures each. The flashes are therefore spread over at
+    least 2 * (k - 1) frame intervals, whatever those pictures contain --
+    and if that many consecutive intervals cannot fit inside a second, the
+    verdict cannot be reached.
+
+    `k` is `_FlashCounter.K` = floor(flash_limit) + 1 for a WCAG failure
+    (more than the limit) and `ext_rate` = ceil(flash_limit) for an extended
+    flash (at the limit), where the profile reports those. The smaller
+    window governs: satisfying it satisfies the longer one, which contains
+    it.
+
+    Returns 0 when no frame rate can be safe -- a limit under 1 makes a
+    single flash a violation, and two pictures a second can carry one.
+    """
+    k_fail = int(np.floor(cfg.flash_limit)) + 1
+    m = 2 * (k_fail - 1)
+    if cfg.flag_extended:
+        k_ext = max(1, min(k_fail, int(np.ceil(cfg.flash_limit))))
+        m = min(m, 2 * (k_ext - 1))
+    return max(0, m)
+
+
+def safe_picture_rate(cfg, margin=RATE_SAFETY_MARGIN):
+    """(pictures per second, seconds between them) that `cfg` cannot fail.
+
+    Space new pictures at least this far apart and the tightest flash window
+    of `flash_window_frames` spans more than the second the rate tests
+    measure over, so no arrangement of those pictures -- however violently
+    they flash -- can be counted as flashing too fast.
+
+    The rate is rounded *down* to two decimals, which is how it is written on
+    a button and typed into a box. That makes the number the user sees the
+    same number the arithmetic was done on: a rate offered as 3.81 and then
+    sent back as 3.81 would be a hair above the rate that was checked, and
+    "is this still guaranteed?" would need a fudge factor to answer. Rounding
+    down instead means anything at or under the quoted figure is safe, full
+    stop, and `rate_is_guaranteed` is a plain comparison.
+
+    Returns (0.0, inf) for a configuration no rate can satisfy.
+    """
+    m = flash_window_frames(cfg)
+    if m < 1:
+        return 0.0, float("inf")
+    fps = math.floor(m / (1.0 + margin) * 100.0) / 100.0
+    return fps, 1.0 / fps
+
+
+def rate_is_guaranteed(cfg, fps) -> bool:
+    """Is thinning to `fps` pictures a second safe by arithmetic alone?
+
+    Above the safe rate a reduction is still often the right edit -- footage
+    that is not flashing violently passes at far more frames than the
+    worst-case bound allows -- but it stops being a promise and becomes a
+    proposal like any other, to be settled by the check that follows it.
+    """
+    safe, _ = safe_picture_rate(cfg)
+    return safe > 0 and fps <= safe + 1e-9
 
 
 def violations_to_sections(violations, cfg, bounds, keyframes=None):

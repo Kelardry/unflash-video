@@ -15,7 +15,8 @@ import numpy as np
 
 from . import ffio
 from .analysis import (FlashDetector, _LUT, analyze_frames,
-                       context_seconds)
+                       context_seconds, safe_picture_rate,
+                       rate_is_guaranteed)
 from .config import detector_signature, profile_name
 
 # How many frames are compared when checking that a fresh decode of a section
@@ -34,6 +35,12 @@ ALIGN_TOL = 0.5
 
 
 ALIGN_GRID = 8
+
+# Ceiling on a hand-typed target rate for "reduce FPS". Nothing above
+# this is an edit -- 1000 pictures a second is past every source this
+# will ever open, so it would remove nothing -- and it keeps a typo in
+# the box from turning into a gap of a few microseconds.
+MAX_TARGET_FPS = 1000.0
 
 
 def frame_signatures(frames, grid=ALIGN_GRID):
@@ -850,6 +857,187 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
                   for i in sorted(removed)},
         "safe": bool(result.safe),
         "rounds": rounds,
+        "note": note,
+        "verdict": result.to_dict(),
+    }
+
+
+def picture_times(rel_pts, edits, extension_seconds=1.0):
+    """When each slot's picture first reaches the screen, per slot.
+
+    Almost always its own display time -- but a removal marked "next" shows
+    the survivor that follows it, so that survivor's picture is already up
+    before its own slot comes round, and it is the earlier moment that the
+    detector sees a change at. A slot whose picture arrived earlier still
+    reports that earlier time here; the callers that care about pictures
+    rather than slots read it only for the slots that survive.
+    """
+    seq = edited_sequence(rel_pts, edits, extension_seconds)
+    first = {}
+    for t, src in seq:
+        if src not in first:
+            first[src] = t
+    return [first.get(src, t) for t, src in seq]
+
+
+def rate_limited_removals(times, min_gap, scope=None, gone=()):
+    """Which frames to remove so no two surviving pictures reach the screen
+    closer than `min_gap` seconds apart. Timestamps only; nothing here sees
+    a picture.
+
+    `times` is when each slot's picture arrives (`picture_times`), `gone` the
+    slots already removed -- they only re-show a neighbour, so they are not
+    pictures of their own and neither space nor consume the gap -- and
+    `scope` the slots this may remove, None for all of them.
+
+    Frames outside `scope` are kept and still set the pace, so the frame
+    after a selection's edge is measured from whatever really precedes it
+    rather than from the edge. A run of them closer together than `min_gap`
+    is left exactly as it is: they are not this edit's to thin, and the
+    guarantee simply does not extend over them.
+    """
+    removed = set()
+    last = None
+    for i, t in enumerate(times):
+        if i in gone:
+            continue
+        if (last is not None and t - last < min_gap - 1e-9
+                and (scope is None or i in scope)):
+            removed.add(i)
+            continue
+        last = t
+    return removed
+
+
+def suggest_frame_rate(project, sid, only=None, fps=None, job=None):
+    """Propose removals that thin the section down to `fps` pictures a
+    second, without looking at a single picture.
+
+    `flash_window_frames` says how many frame intervals a burst of flashing
+    needs to reach a verdict under this detector -- a bound that comes from
+    how flashes are paired and counted, not from what the frames contain.
+    Space the surviving pictures more than a second apart over that many
+    intervals and the verdict is out of reach whatever they show, so the
+    whole job here is arithmetic on timestamps.
+
+    Working from timestamps is also the only thing that works on variable
+    frame rate sources. A capture of a livestream can run at 60 fps through
+    the action and 4 fps through a stall, and "keep every nth frame" gives a
+    different rate in each -- far too dense in one place and needlessly
+    destructive in the other. Keeping the next frame that is far enough
+    *in time* from the last one kept gives the same rate throughout.
+
+    fps: target rate, defaulting to the profile's safe one. A higher rate is
+    allowed and is often the better edit -- the bound assumes every frame is
+    the opposite of the last, which real footage rarely is, so content that
+    is not flashing violently passes at many more frames than the worst case
+    permits. Above the safe rate the result is a proposal rather than a
+    promise, and the verdict returned with it is what settles the matter.
+
+    only: optional collection of ordinals -- removals are restricted to those
+    frames (the user's selection), and the guarantee holds over the span they
+    cover. Frames outside it keep whatever marks they have and still pace the
+    spacing, so a selection abutting untouched footage is not thinned on the
+    strength of frames that will arrive at full rate.
+    """
+    sec = project.section(sid)
+    cfg = project.detector_config
+    info = project.data["info"]
+    aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
+    frames = load_cache(project, sid)
+    rel_pts = shown_pts(sec)
+    n = len(rel_pts)
+    if n == 0:
+        raise RuntimeError("Section has no frames")
+
+    safe_fps, safe_gap = safe_picture_rate(cfg)
+    if fps is None:
+        fps, min_gap = safe_fps, safe_gap
+        if fps <= 0:
+            raise RuntimeError(
+                "This profile treats a single flash as a violation, so no "
+                "frame rate is safe by timing alone. Choose a rate yourself "
+                "and let the check judge it.")
+    else:
+        fps = float(fps)
+        if not (0 < fps <= MAX_TARGET_FPS):
+            raise RuntimeError(
+                f"A target rate has to be between 0 and {MAX_TARGET_FPS} "
+                f"pictures a second.")
+        min_gap = 1.0 / fps
+    guaranteed = rate_is_guaranteed(cfg, fps)
+
+    only_set = set(int(i) for i in only) if only else None
+    base_edits = {}
+    if only_set is not None:
+        base_edits = {k: v for k, v in (sec.get("edits") or {}).items()
+                      if int(k) not in only_set}
+
+    def prog(p, msg):
+        if job:
+            job.set_progress(p, msg)
+
+    prog(0.05, f"thinning to {fps:g} pictures/s")
+    ext_s = project.render_config.extension_seconds
+    # A removal never moves anything in time -- the slot stays where it is
+    # and holds a neighbour's picture -- so these times are the ones the walk
+    # has to measure against, and they stay put as removals are added to
+    # them. Only an extension mark shifts the timeline, and those are already
+    # in `base_edits`.
+    times = picture_times(rel_pts, base_edits, ext_s)
+    gone = {i for i, (r, _, _) in _parse_edits(base_edits).items() if r}
+
+    removed = rate_limited_removals(times, min_gap, scope=only_set, gone=gone)
+
+    prog(0.5, "verifying")
+    edits = dict(base_edits)
+    edits.update({str(i): {"removed": True, "extended": False}
+                  for i in removed})
+    ctx = section_context(project, sid, ext_s)
+    result = simulate_edits(frames, rel_pts, edits, cfg, aw, ah, ext_s,
+                            context=ctx)
+    seq = edited_sequence(rel_pts, edits, ext_s)
+    inside, after, _, _ = _classify(result, seq[-1][0] if seq else 0.0,
+                                    ctx.next_at)
+    result.violations = inside + after
+
+    pool = [i for i in range(n)
+            if i not in gone and (only_set is None or i in only_set)]
+    where = " in the selection" if only_set is not None else ""
+    note = (f"Thinned to {fps:g} pictures/s: "
+            f"{len(pool) - len(removed)} of {len(pool)} frames{where} kept, "
+            f"{len(removed)} removed.")
+    if result.safe and not guaranteed:
+        # Worth saying which of the two this was. A rate above the bound can
+        # only be *checked*, and a check speaks for these frames, not for
+        # every arrangement of them -- so re-editing around it can undo it,
+        # where a run at the safe rate could not.
+        note += (f" That is above the guaranteed-safe {safe_fps:g}/s, so it "
+                 "passes on what these frames actually do rather than by "
+                 "arithmetic — re-check it if you edit around it.")
+    elif not result.safe:
+        if not guaranteed:
+            note += (f" Still failing at a rate above the guaranteed-safe "
+                     f"{safe_fps:g}/s — drop to that and it cannot fail on "
+                     "the frames this was allowed to touch.")
+        else:
+            # The reduction can only govern the frames it was allowed to
+            # touch. Anything left is flashing carried by pictures arriving
+            # at full rate on one side or the other of that span.
+            note += (" Still failing — the flashing left runs "
+                     + ("outside the selection; widen it or run this on the "
+                        "whole section." if only_set is not None else
+                        "into the footage either side of this section, which "
+                        "this section's edits cannot reach."))
+
+    return {
+        "edits": {str(i): {"removed": True, "extended": False}
+                  for i in sorted(removed)},
+        "safe": bool(result.safe),
+        "rounds": 1,
+        "fps": fps,
+        "safe_fps": safe_fps,
+        "guaranteed": guaranteed,
         "note": note,
         "verdict": result.to_dict(),
     }
