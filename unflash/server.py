@@ -21,7 +21,7 @@ import webbrowser
 from flask import (Flask, Response, jsonify, redirect, request, send_file,
                    send_from_directory, abort)
 
-from . import ffio, instance
+from . import instance
 from .analysis import (analyze_file, violations_to_sections,
                        timeline_summary, safe_picture_rate)
 from .config import profile_config, profile_name
@@ -393,7 +393,8 @@ def update_settings():
                            render=data.get("render"))
     return jsonify({"detector": proj().data["detector"],
                     "render": proj().data["render"],
-                    "safe_fps": safe_picture_rate(proj().detector_config)[0]})
+                    "safe_fps": safe_picture_rate(proj().detector_config)[0],
+                    "max_fps": MAX_TARGET_FPS})
 
 
 # --- scan --------------------------------------------------------------------

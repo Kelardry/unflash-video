@@ -13,7 +13,9 @@ const state = {
   flagged: new Set(),
   flaggedRed: new Set(),
   saveTimer: null,
-  activeJob: null,
+  pendingSave: null,     // {sid, edits} waiting on saveTimer
+  activeJob: null,       // the job the bar shows, and cancel targets
+  liveJobs: new Map(),   // jobId -> label, every job still running
   audioCtx: null,
   safeFps: 0,           // rate below which the profile cannot report flashing
   fps: 0,               // rate "reduce FPS" will thin to (editable)
@@ -47,10 +49,29 @@ function toast(msg, isError = false) {
 }
 
 // ---------- long-operation notification ----------
+// The bell: whether a long operation announces itself at all, and how long
+// "long" is. Both are this browser's own preference rather than the
+// project's, so they live in localStorage. Off means off completely -- no
+// beep, no notification, and no asking for permission to post one.
+function notifyEnabled() { return $("notifyOn").checked; }
+
+$("notifyOn").checked =
+  (localStorage.getItem("unflash.notify") ?? "1") !== "0";
 $("notifyMin").value = localStorage.getItem("unflash.notifyMin") ?? 5;
+
+function refreshNotifyUi() {
+  // a threshold with nothing left to trigger reads as though it applies
+  $("notifyMin").disabled = !notifyEnabled();
+}
+
+$("notifyOn").onchange = () => {
+  localStorage.setItem("unflash.notify", notifyEnabled() ? "1" : "0");
+  refreshNotifyUi();
+};
 $("notifyMin").onchange = () => {
   localStorage.setItem("unflash.notifyMin", $("notifyMin").value);
 };
+refreshNotifyUi();
 document.addEventListener("click", () => {
   // create the audio context inside a user gesture so beeps are allowed later
   if (!state.audioCtx) {
@@ -80,6 +101,7 @@ function beep() {
 }
 
 function notifyLongOp(label, elapsedMs) {
+  if (!notifyEnabled()) return;
   const minMin = parseFloat($("notifyMin").value);
   if (!(minMin >= 0) || elapsedMs < minMin * 60000) return;
   beep();
@@ -96,25 +118,52 @@ function notifyLongOp(label, elapsedMs) {
 }
 
 // ---------- jobs ----------
-function pollJob(jobId, label, onDone, startedAt = Date.now()) {
-  state.activeJob = jobId;
-  $("jobbar").classList.remove("hidden");
+// The bar shows one job, but nothing stops two from running -- a section
+// render started while an export is going, say. Hiding the bar and clearing
+// activeJob whenever *any* job ended left the other one with no progress
+// and a cancel button pointing at something already finished, so the bar
+// follows whatever is still live instead.
+function showJobBar() {
+  const live = [...state.liveJobs.entries()];
+  if (!live.length) {
+    state.activeJob = null;
+    $("jobbar").classList.add("hidden");
+    return;
+  }
+  // the most recently started is the one the user just asked for
+  const [id, label] = live[live.length - 1];
+  state.activeJob = id;
   $("jobName").textContent = label;
-  if ("Notification" in window && Notification.permission === "default") {
+  $("jobbar").classList.remove("hidden");
+}
+
+function pollJob(jobId, label, onDone, startedAt = Date.now()) {
+  state.liveJobs.set(jobId, label);
+  showJobBar();
+  if (notifyEnabled() && "Notification" in window
+      && Notification.permission === "default") {
     Notification.requestPermission();
   }
   const tick = async () => {
     let j;
     try { j = await api(`/api/job/${jobId}`); }
-    catch (e) { toast(`${label}: ${e.message}`, true); $("jobbar").classList.add("hidden"); return; }
-    $("jobBar").style.width = `${(j.progress * 100).toFixed(1)}%`;
-    $("jobMsg").textContent = j.message || j.status;
+    catch (e) {
+      toast(`${label}: ${e.message}`, true);
+      state.liveJobs.delete(jobId);
+      showJobBar();
+      return;
+    }
+    // only the job on display writes to the bar
+    if (state.activeJob === jobId) {
+      $("jobBar").style.width = `${(j.progress * 100).toFixed(1)}%`;
+      $("jobMsg").textContent = j.message || j.status;
+    }
     if (j.status === "running" || j.status === "queued") {
       setTimeout(tick, 500);
       return;
     }
-    $("jobbar").classList.add("hidden");
-    state.activeJob = null;
+    state.liveJobs.delete(jobId);
+    showJobBar();
     notifyLongOp(label, Date.now() - startedAt);
     if (j.status === "error") { toast(`${label} failed: ${j.error}`, true); return; }
     if (j.status === "cancelled") { toast(`${label} cancelled`); return; }
@@ -282,12 +331,20 @@ $("btnOpenProject").onclick = async () => {
 // one, and silently keeping it would leave the button promising something
 // this profile does not.
 function setFpsHint(safeFps, maxFps) {
-  if (!safeFps) return;
+  // Zero is an answer -- a profile that fails on a single flash has no rate
+  // that is safe by arithmetic -- so only a missing one is ignored. Taking
+  // it for "no answer" left the previous profile's rate on screen, still
+  // promising something this profile does not.
+  if (safeFps === undefined || safeFps === null) return;
   if (maxFps) state.maxFps = maxFps;
   if (safeFps !== state.safeFps) {
     state.safeFps = safeFps;
-    state.fps = safeFps;
-    $("fpsInput").value = fmtRate(safeFps);
+    // with no guaranteed rate there is nothing to reset the target to;
+    // whatever is in the box stays, for the check after it to judge
+    if (safeFps > 0) {
+      state.fps = safeFps;
+      $("fpsInput").value = fmtRate(safeFps);
+    }
   }
   refreshFpsUi();
 }
@@ -714,6 +771,7 @@ async function deleteAllSections() {
   const n = sectionCount();
   if (!n) { toast("No sections to delete"); return; }
   if (!confirm(`Delete ALL ${n} sections, including their edits and renders? This cannot be undone.`)) return;
+  discardSave();
   try {
     const r = await api("/api/sections", "DELETE");
     toast(`Deleted ${r.deleted} sections.`);
@@ -737,6 +795,7 @@ const ALL_ACTIONS = {
 };
 
 $("btnHome").onclick = () => {
+  flushSave();
   state.sectionId = null;
   state.section = null;
   $("workspace").classList.add("hidden");
@@ -749,6 +808,8 @@ $("btnHome").onclick = () => {
 
 // ---------- section workspace ----------
 async function openSection(sid) {
+  // marks made in the section on screen belong to it, not to this one
+  await flushSave();
   try {
     const d = await api(`/api/section/${sid}`);
     state.sectionId = sid;
@@ -853,11 +914,13 @@ function computeFlagged() {
 
 $("btnPrepare").onclick = async () => {
   const sid = state.sectionId;
-  const r = await api(`/api/section/${sid}/prepare`, "POST", {});
-  pollJob(r.job, `Preparing section #${sid}`, () => {
-    toast("Section prepared.");
-    refreshProject(sid);
-  });
+  try {
+    const r = await api(`/api/section/${sid}/prepare`, "POST", {});
+    pollJob(r.job, `Preparing section #${sid}`, () => {
+      toast("Section prepared.");
+      refreshProject(sid);
+    });
+  } catch (e) { toast(e.message, true); }
 };
 
 $("btnReprepare").onclick = async () => {
@@ -879,6 +942,7 @@ $("btnReprepare").onclick = async () => {
 $("btnDeleteSection").onclick = async () => {
   if (!confirm("Delete this section (its edits and renders)?")) return;
   const sid = state.sectionId;
+  discardSave(sid);
   try {
     await api(`/api/section/${sid}`, "DELETE");
     forgetOpenSection();
@@ -963,17 +1027,66 @@ function replacementMap(n) {
   return rep;
 }
 
+// Marks are written back on a 600 ms debounce, and 600 ms is long enough to
+// mark a frame and click another section. The save has to carry the section
+// it was made in with it: reading state.sectionId and state.edits when the
+// timer fires writes whatever section is open *then*, which loses the marks
+// just made and clears the check verdict of the section switched to (and,
+// through Project._stale_neighbour_checks, of its neighbours) for a change
+// that never happened. So bind both at schedule time, and flush whatever is
+// still queued before anything can replace them.
 function scheduleSave() {
   setVerdict(null);
   if (state.section) state.section.check = null;   // edits changed: stale
   updateUnsafeBtn();
   clearTimeout(state.saveTimer);
-  state.saveTimer = setTimeout(async () => {
-    try {
-      await api(`/api/section/${state.sectionId}/edits`, "POST", { edits: state.edits });
-      refreshBadges();
-    } catch (e) { toast("Saving edits failed: " + e.message, true); }
-  }, 600);
+  state.pendingSave = {
+    sid: state.sectionId,
+    edits: JSON.parse(JSON.stringify(state.edits)),
+  };
+  state.saveTimer = setTimeout(flushSave, 600);
+}
+
+// Write a queued save now. Safe to call at any time: it clears the queue
+// before it awaits, so a mark made while it is in flight queues its own.
+async function flushSave() {
+  clearTimeout(state.saveTimer);
+  const pend = state.pendingSave;
+  state.pendingSave = null;
+  if (!pend || pend.sid === null || pend.sid === undefined) return;
+  try {
+    await api(`/api/section/${pend.sid}/edits`, "POST", { edits: pend.edits });
+    refreshBadges();
+  } catch (e) { toast("Saving edits failed: " + e.message, true); }
+}
+
+// A mark made in the last moments before the tab closes has no 600 ms to
+// wait in, and a fetch started here is cancelled along with the page.
+// sendBeacon hands the write to the browser, which delivers it after the
+// page is gone.
+window.addEventListener("pagehide", () => {
+  const pend = state.pendingSave;
+  if (!pend || pend.sid === null || pend.sid === undefined) return;
+  state.pendingSave = null;
+  clearTimeout(state.saveTimer);
+  try {
+    navigator.sendBeacon(
+      `/api/section/${pend.sid}/edits`,
+      new Blob([JSON.stringify({ edits: pend.edits })],
+               { type: "application/json" }));
+  } catch (e) { /* on the way out there is nothing further to try */ }
+});
+
+// Throw a queued save away instead of writing it: the section it belongs to
+// is being deleted, so writing its marks back would only re-create them on
+// the way out. With no argument, drops whatever is queued.
+function discardSave(sid) {
+  const pend = state.pendingSave;
+  if (!pend) return;
+  if (sid === undefined || String(pend.sid) === String(sid)) {
+    clearTimeout(state.saveTimer);
+    state.pendingSave = null;
+  }
 }
 
 async function refreshBadges() {
@@ -1283,9 +1396,16 @@ function refreshFpsUi() {
   if (ok) state.fps = v;
   $("fpsShown").textContent = ok ? `${fmtRate(v)}/s` : "";
   const note = $("fpsNote");
+  // nothing to go back to when no rate is guaranteed
+  $("btnFpsSafe").disabled = !safe;
   if (!ok) {
     note.textContent = `A rate between 0 and ${fmtRate(state.maxFps || 1000)}`
       + " pictures a second.";
+    note.classList.add("warn");
+  } else if (!safe) {
+    note.textContent = "This profile treats a single flash as a violation,"
+      + " so no rate is safe by arithmetic alone. Thinning still helps, but"
+      + " it is the check after it that decides.";
     note.classList.add("warn");
   } else if (v <= safe) {
     note.textContent = `At or under ${fmtRate(safe)}/s no arrangement of`
@@ -1304,7 +1424,10 @@ function refreshFpsUi() {
       + "second, from their timestamps alone — the pictures themselves are "
       + "never looked at, so it works on variable-frame-rate sources and on "
       + "flashing the other suggesters cannot shift. "
-      + (v <= safe
+      + (!safe
+        ? "This profile has no rate that is safe by arithmetic — the "
+          + "check that follows decides."
+        : v <= safe
         ? `At or under ${fmtRate(safe)}/s this profile cannot report flashing `
           + "at all. Use the arrow to keep more frames."
         : `Above the guaranteed-safe ${fmtRate(safe)}/s — the check that `
@@ -1621,6 +1744,8 @@ $("btnVerifyExport").onclick = async () => {
 // process has actually gone. This is the button that makes that possible
 // without asking anyone to go looking in Task Manager.
 async function quitUnflash(force) {
+  // the server is about to stop; an unwritten mark would go with it
+  await flushSave();
   try {
     const r = await api("/api/quit", "POST", force ? { force: true } : {});
     const stopped = (r && r.stopped) || [];

@@ -14,9 +14,8 @@ from dataclasses import asdict
 import numpy as np
 
 from . import ffio
-from .analysis import (FlashDetector, _LUT, analyze_frames,
-                       context_seconds, safe_picture_rate,
-                       rate_is_guaranteed)
+from .analysis import (FlashDetector, _LUT, context_seconds,
+                       safe_picture_rate, rate_is_guaranteed)
 from .config import detector_signature, profile_name
 
 # How many frames are compared when checking that a fresh decode of a section
@@ -748,7 +747,6 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
     aw, ah = ffio.analysis_dims(info["width"], info["height"], cfg)
     frames = load_cache(project, sid)
     rel_pts = shown_pts(sec)
-    n = len(rel_pts)
     t_arr = np.asarray(rel_pts)
     only_set = set(int(i) for i in only) if only else None
     # existing edits outside the restricted scope stay in force

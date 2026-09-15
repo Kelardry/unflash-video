@@ -14,7 +14,12 @@
   <button id="btnOpenProject" title="Open an existing &lt;name&gt;.unflash project folder — use this when a project was moved, renamed, or is not picked up automatically">Open project folder…</button>
   <div id="videoInfo" class="video-info"></div>
   <div class="spacer"></div>
-  <label class="profile-label" title="Notify + beep when an operation takes longer than this many minutes">🔔≥<input type="number" id="notifyMin" min="0" step="1" style="width:3.2em"> min</label>
+  <div class="profile-label" title="Notify and beep when an operation takes longer than the minutes given">
+    <input type="checkbox" id="notifyOn" title="Announce long operations when they finish">
+    <label for="notifyOn">🔔≥</label>
+    <input type="number" id="notifyMin" min="0" step="1" style="width:3.2em" title="How many minutes an operation has to run before it is worth announcing">
+    <span>min</span>
+  </div>
   <label class="profile-label">Profile
     <select id="profileSel" title="Which hazards the detector flags. Extended flashes are not WCAG failures, but they still affect some photosensitive viewers.">
       <option value="wcag_ext">Exact WCAG + flag extended flashes (default)</option>
