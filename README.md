@@ -1,473 +1,239 @@
 # Unflash
 
-Detect and repair photosensitive-hazard flashing in videos, while keeping the
-visual information that naive "flash removal" filters destroy.
-Removed frames are replaced by the nearest kept frame — the one before them
-or, if you ask, the one after them — with timing untouched),
-Important flash frames can be extended to last for 1 second with silent audio,
-to keep any important information.
+Unflash finds the flashing in a video that can trigger photosensitive
+seizures, and helps you take it out without wrecking the footage.
 
-## Setup
+Most "flash removal" just dims or blurs the whole video. Unflash removes
+individual frames instead and holds the neighboring frame in their place,
+so the picture stays sharp, the audio stays in sync and the running time
+doesn't change. If a frame you need to remove has something important on it,
+you can hold it on screen for a second instead, with the sound muted.
+
+Everything happens on your own computer. Nothing is uploaded anywhere.
+
+**This reduces risk. It is not a guarantee.** Please read
+[Limitations](#limitations) at the bottom before you rely on it.
+
+If you want to know exactly how the flash detection works, that's in
+[DETECTION.md](DETECTION.md).
+
+## Installing
+
+You need Python, and ffmpeg with `ffmpeg` and `ffprobe` on your PATH.
 
 ```
 pip install -r requirements.txt
 ```
 
-Requires `ffmpeg` and `ffprobe` on PATH.
-
-## Run
+## Running
 
 ```
 run_unflash.bat
 ```
 
-A browser page opens at http://127.0.0.1:8765/. Everything runs locally.
+A browser tab opens at http://127.0.0.1:8765/.
 
-**After updating the code, use the Quit button before starting Unflash
-again.** Closing the browser tab is not enough. Running
-`run_unflash.bat` a second time does not start a second server: it finds
-the one already running for your account and just reopens the browser on
-it (see "Several people signed in to one PC" below). That server is
-still holding the modules it imported when it started, so an updated
-file changes nothing until the process is gone.
+When you're finished, press **Quit** in the header rather than just closing
+the tab. Closing the tab leaves Unflash running in the background, and the
+next launch will find that copy and reopen the tab on it. This matters after
+an update: a running copy keeps the code it started with, so a new version
+does nothing until the old one has really stopped. The header shows the date
+of the code it's running, and a red banner appears if the files on disk are
+newer than that.
 
-**Quit** (in the header) stops it properly: it asks first if a render or
-export is still running, cancels what it stops, and frees the port so
-the next launch starts fresh. The header also shows the date of the code
-the running server loaded, and a red banner appears if the files on disk
-are newer than that -- if you ever suspect an update has not taken, read
-the build date rather than guessing.
+## The short version
 
-### Several people signed in to one PC
+1. **Open video.** A folder called `<name>.unflash` appears next to it, and
+   everything you do is saved there as you go. You can close the tab and
+   come back later.
+2. **Scan for flashes.** Unflash checks the whole video and puts a numbered
+   *section* around each problem. The timeline shows where the flashing is.
+3. **Prepare** a section (or **prepare all** in the sidebar). This pulls out
+   the frames so you can work on them.
+4. **Edit.** Mark the frames you want gone, or let **Suggest** do it.
+5. **Check safety.** An instant verdict with nothing to render. Green means
+   this section passes now.
+6. **Render full-res.** Every section needs this before you can export.
+7. **Export**, then **Verify exported file** to re-scan the finished video.
 
-Each account gets its own server, because a server's file dialogs and browse
-windows open on the desktop of whoever started it. The first account to start
-Unflash takes port 8765, the next takes 8766, and so on; a server only answers
-requests carrying its own account's token, so nobody else's browser can reach
-your projects — they get a short "this server is not yours" page instead.
-Starting the tool twice from the same account just re-opens the browser on the
-copy already running (`--new` starts a second one anyway).
+You can also make your own sections: drag on the timeline, or type a start
+and end time next to it.
 
-The token is kept in your own profile folder (`%LOCALAPPDATA%\Unflash`) and
-printed at startup, so if a tab ever shows that page you can paste the printed
-`http://127.0.0.1:<port>/?token=...` address to get back in.
+## Editing a section
+
+Click a frame in the grid to select it. Shift-click selects everything
+between two clicks, ctrl-click adds or removes one, and Esc clears the
+selection. With **Caps Lock on**, shift-click selects a rectangle in the
+grid instead, which is handy for taking out a whole run of rows.
+
+Then press a key, or use the buttons under the grid:
+
+| key | what it does |
+|---|---|
+| **R** | remove, and show the frame *before* it instead |
+| **F** | remove, and show the frame *after* it instead |
+| **E** | hold this frame on screen for 1 second, muted |
+| **U** | unmark |
+
+Removed frames go red either way. The little badge on each one tells you
+which frame will be showing in its place, so you can see at a glance what
+you're actually going to get.
+
+R and F usually look identical, but not always: on a cut, filling from the
+wrong side drags a frame of the old shot across the join. If something looks
+smeared in the preview, try the other one.
+
+### Letting it pick for you
+
+**Suggest: keep light** and **Suggest: keep dark** work out a set of
+removals, run them past the detector, and keep going until the section
+passes. Keep-light holds the brighter frames, keep-dark the darker ones.
+Try both and see which looks better; whichever you run last replaces the
+one before it, so there's nothing to undo in between.
+
+**Suggest: reduce FPS** is the fallback for flashing the other two can't
+budge, like a strobe with no steady bright or dark phase to hold on to. It
+thins the section down to a frame rate that simply can't flash fast enough
+to fail, working from the frame timings alone. It never looks at the
+pictures, so it works on anything. The result is choppier, and the button
+tells you what rate it's about to use.
+
+That rate is a worst case, and most footage passes at a lot more frames than
+it allows. The **▾** next to the button lets you type your own rate, with
+*safe rate* to put it back. A good way to use it: run it at the safe rate to
+see the section go green, then raise the rate until it goes red again and
+step back one.
+
+Check **selection only** on any of the three to confine it to the frames
+you've selected.
+
+## When a check fails
+
+**Check safety** tells you what's still wrong and roughly where. Press
+**select unsafe frames** and it highlights the exact frames inside the
+failing moment, so you can remove more of them.
+
+Two things it might tell you that aren't about this section:
+
+- **"just over the line"** means the flashing is sitting almost exactly on
+  the threshold. Re-encoding a video moves the measurement by a couple of
+  percent all by itself, so content this close can pass here and fail in the
+  finished file. Trim a bit more than looks necessary and it settles down.
+- **"past the end of this section"** means your edits left flashing just
+  after the last frame you can reach. Drag the section's end out past it, or
+  edit the next section.
+
+Previews are slightly less sensitive than full renders, because they're
+analyzed at a lower resolution. Where the two disagree, believe the
+full-resolution one.
+
+## Exporting
+
+Every section has to be rendered at full resolution first. **render all** in
+the sidebar does them all and skips any that are already up to date. If you
+edit a section after rendering it, it gets a *render stale* badge and you'll
+need to render it again.
+
+The export dialog offers three ways of putting the video back together:
+
+- **Re-encode spans, stream-copy join** (the default). Rebuilds the parts,
+  then joins them without re-encoding. Fastest, and no quality loss at the
+  joins.
+- **Re-encode spans, filter join.** Decodes and re-joins everything in one
+  pass, rebuilding every timestamp along the way. Costs one more encode
+  (invisible in practice) and is the one to reach for if a join ever comes
+  out wrong.
+- **Smart-cut.** Copies the untouched parts as they are instead of
+  re-encoding them. Much faster, h264 sources only.
+
+Then press **Verify exported file** to re-scan the finished video. Verifying
+reads the file that's already there; it doesn't export again.
+
+## Picking a profile
+
+The **Profile** dropdown in the header decides what counts as a problem.
+Every check, render and verification uses whichever one is selected.
+
+| Profile | What it flags |
+|---|---|
+| **Exact WCAG + flag extended flashes** (default) | WCAG failures, plus sustained flashing that sits right at the legal limit |
+| **Exact WCAG only** | WCAG failures and nothing else |
+| **Stricter than WCAG** | A tighter threshold, for extra margin |
+
+**Extended flashes** are the middle one's specialty: flashing that meets
+every WCAG failure condition except the rate, running *at* the permitted
+speed rather than above it, for 5 seconds or more. WCAG lets that through.
+UK broadcast guidance doesn't, and it does affect some viewers, so the
+default profile treats them as work sections you can edit like any other.
+They're labeled *extended flash* so you can tell them apart.
+
+**Stricter than WCAG** is for photosensitive migraine and similar, where the
+WCAG line is drawn in the wrong place. It doesn't list extended flashes
+separately because it already fails outright at that speed.
+
+If you change profile partway through a project, use the sidebar's **all
+sections ▾** menu to re-prepare, re-check and refresh labels under the new
+one. Your frame marks are kept.
+
+## Resuming, moving and recovering
+
+Everything lives in the `<video name>.unflash` folder next to the video, so
+reopening that video picks the work up again, even if you've since moved or
+renamed both.
+
+If it isn't picked up automatically, or you moved the folder away from its
+video, use **Open project folder…** and point it at the `.unflash` folder
+itself. The paths saved inside get repaired, and anything genuinely missing
+is listed at the top of the window.
+
+If the folder still has section folders in it that the project file doesn't
+know about, a **recover sections** button appears. It rebuilds them from
+what's on disk and keeps the full-res renders, so a project whose project
+file got lost can still be exported. The frame marks are gone for good
+though, so recovered sections show as *unprepared*: re-rendering one would
+give you an unedited version. Verify the export when you're done.
+
+## Sharing a PC
+
+Each Windows account gets its own copy, on its own port (8765, then 8766,
+and so on), and a copy only answers its own account. Anyone else's browser
+gets a short "this server is not yours" page. The access token is kept in
+your own profile folder (`%LOCALAPPDATA%\Unflash`) and printed when Unflash
+starts, so if you ever land on that page you can paste the printed address
+to get back in.
+
+Two accounts opening the *same* video still share the one `.unflash` folder
+beside it, and would overwrite each other's edits.
+
+Command-line flags, if you need them:
 
 | flag | effect |
 |---|---|
-| `--port N` | use exactly this port instead of picking a free one |
-| `--new` | start another server even if this account already has one |
-| `--no-token` | turn the check off: every account on the PC can then use this server, its projects and its file dialogs |
+| `--port N` | use this exact port |
+| `--new` | start another copy even if this account has one |
+| `--no-token` | turn the access check off, so every account on the PC can use this copy, its projects and its file dialogs |
 | `--no-browser` | don't open a browser |
 | `--video FILE` | open this video on startup |
 
-Note that two accounts opening the *same* video still share the one
-`<name>.unflash` folder beside it, and would overwrite each other's edits.
+## Other bits
 
-## Workflow
+The 🔔 box in the header takes a number of minutes. Any job that runs longer
+than that beeps and posts a desktop notification when it finishes, so you
+can go do something else during a long render.
 
-1. **Open video** — a work folder `<name>.unflash/` is created next to it;
-   all state (sections, edits, proxies, renders) persists there, so you can
-   close and resume anytime. Re-opening the same video picks that folder up
-   again, even if the video and its folder have since been moved or renamed.
-   **Open project folder…** loads a `<name>.unflash` folder you point at
-   directly — for when it was moved away from its video, or was not picked up
-   automatically. Either way the paths saved inside it are re-pointed at where
-   the files actually are, and anything genuinely missing is reported so you
-   know what to prepare or render again.
+The video player is dimmed by default, and says whether what you're about to
+watch has passed the detector. The dimming is a courtesy, not a safeguard.
 
-   If the folder holds `section_*` folders that `project.json` does not list,
-   a **recover sections** button appears. It rebuilds those sections, taking
-   their time ranges from the part list of the last export (or, failing that,
-   the last scan) and keeping the full-res renders, so a project whose
-   `project.json` was lost can still be exported. Frame marks live only in
-   `project.json` and cannot be recovered, so a recovered section is marked
-   *unprepared*: re-rendering it would produce an unedited version. Verify the
-   export when you are done.
+## Limitations
 
-   A project file that cannot be read is never overwritten — it is copied to
-   `project.unreadable-<timestamp>.json` before a fresh project is started.
-2. **Scan for flashes** — a WCAG 2.x / PEAT-style detector (general flash,
-   red flash, and — unless the profile is *Exact WCAG only* — extended
-   flashes) runs over the whole video and produces
-   numbered work *sections* around each problem, snapped to keyframes. The
-   timeline shows a flash-intensity heatmap. You can also add sections by
-   dragging on the timeline or typing exact timestamps, and change a
-   section's range from its workspace (this resets its preparation).
-3. **Prepare a section** (or **prepare all** in the sidebar) — analyzes every
-   frame, caches analysis frames, builds a 540p proxy and per-frame
-   thumbnails.
-4. **Edit** — mark frames *removed* (red) or *extended* (blue, held 1 s with
-   silence). A removed frame is replaced by the nearest kept frame in its
-   fill direction: **R** takes the one before it, **F** the one after it.
-   Both look the same in the grid — the badge on the frame names the one
-   that shows in its place. Click to select; shift-click
-   selects the run between clicks; with **Caps Lock on**, shift-click selects
-   a geometric rectangle in the grid instead (no key-holding needed);
-   ctrl-click adds/removes. Keys **R** / **F** / **E** / **U** apply to the
-   selection. **Suggest: keep light / keep dark** proposes a removal set,
-   verifies it through the detector, and escalates until the section passes —
-   tick *selection only* to confine its removals to the frames you selected;
-   its proposals always fill from the previous frame.
-   **Suggest: reduce FPS** is the fallback for flashing the other two cannot
-   shift: it thins the section down to a frame rate the active profile
-   *cannot* fail, and decides purely from the frame timestamps — it never
-   looks at a picture. The button says which rate it will use; the **▾**
-   beside it opens a box to type a different one, with *safe rate* to put it
-   back. See *The safe frame rate*, below.
-   Where a fill direction runs out it falls back the other way: removals at
-   the very start of a section backfill from the first kept frame, and an
-   **F** run at the very end holds the last kept frame before it.
-5. **Check safety** — instant verdict: your current edits are simulated
-   through the detector without rendering anything. If it fails, **select
-   unsafe frames** highlights exactly the frames inside the failing
-   window(s). Frames in flash events carry a corner dot: yellow for general
-   flashes, magenta for red flashes. The simulation is fed the real footage
-   on either side of the section as well (see *Sections that close*, below),
-   so it starts in the state a pass over the whole export would reach the
-   section in, and it will also tell you about flashing your edits leave
-   just *past* the section's end.
-6. **Preview render** — applies edits at proxy resolution (decoded from the
-   original, so frames always line up) and re-verifies the rendered file.
-7. **Render full-res** — **required for every section before export** (or
-   use **render all** in the sidebar, which skips sections already rendered
-   with their current edits). If you edit a section after rendering it, it
-   gets a *render stale ⚠* badge — re-render it, or export will warn.
-8. **Export** — stitches rendered sections with the untouched spans.
-   Both *re-encode* options rebuild every untouched span and differ only in
-   how the parts are joined: the **stream-copy join** stitches them without
-   re-encoding (fastest, no quality loss), while the **filter join** decodes
-   and concatenates everything in a single ffmpeg pass — one extra encode
-   generation (~45 dB PSNR, visually invisible) in exchange for rebuilding
-   every timestamp, so no mismatch between parts can throw it off.
-   *Smart-cut* stream-copies untouched spans (fast, h264 sources only).
-   The dialog reports what the chosen join will do before you start,
-   including the part count; past roughly 275 sections the filter join needs
-   more inputs than one command line can name, so the export is assembled in
-   batches — those are joined by stream copy, so batching costs no extra
-   quality. The export self-checks that the output's timing matches the sum
-   of its parts. Then **Verify exported file** re-scans the final output
-   with your selected detector profile.
+- **This reduces risk. It does not guarantee safety.** Passing the detector
+  means passing a published set of thresholds, not that the video is safe
+  for every person.
+- Static patterns like fine stripes and gratings can also trigger
+  photosensitive responses, and Unflash does **not** detect those.
+- Review the flagged sections yourself before you share anything.
 
-A section's own header carries **re-prepare section**, which does the same
-thing for just the one you have open.
-
-The sidebar's **all sections ▾** menu runs one step over the whole project
-at once, for when the detection profile changed or a new version of the
-program made a processing step worth repeating:
-
-- **re-prepare all** — analyze every section again under the current profile
-  and rebuild its proxy and thumbnails. Frame marks are kept; a section whose
-  frame count comes out different says so in its warnings, because the marks
-  are held by frame ordinal.
-- **re-render all** — render every prepared section again, including ones
-  already up to date (which *render all* would skip).
-- **re-check all** — re-run the instant safety simulation everywhere.
-- **refresh all labels** — drop the badges that no longer describe the
-  project: check and render verdicts recorded under a different detection
-  profile, and entries whose files have left the work folder. Renders
-  themselves are kept — only the verdict on one is dropped, so it reads as
-  *rendered, unchecked* until you re-check or re-render it.
-- **delete all** — remove every section, with its edits and renders.
-
-The 🔔 field in the header sets a threshold (minutes): any operation that
-takes longer triggers a beep + desktop notification when it finishes.
-
-## CLI
-
-```
-python -m unflash.cli analyze VIDEO [--start S --duration D] [--wcag]
-python -m unflash.cli scan VIDEO [--wcag]
-```
-
-## Detection details
-
-Implements the WCAG 2.x / PEAT definitions: relative luminance with sRGB
-linearization; a transition qualifies when a pixel's accumulated monotonic
-luminance change is >= 10% of max luminance with the darker state < 0.80
-(red: |Δ(R−G−B)×320| > 20 **and** the pixel enters or leaves the saturated
-state R/(R+G+B) >= 0.8 — brightness wobble inside a continuously-red scene is
-not a red flash; red↔dark flashing is caught by the general luminance
-criterion). A pixel *flashes* when it completes a pair of opposing
-qualifying transitions within a second. Content fails only when three
-things hold at once in some 341×256 window (content viewed at 1024×768):
-
-1. pixels flashing more than 3 times per second (strict profile: 2) cover
-   at least a quarter (strict: a fifth) of the window,
-2. those pixels flashed *just now* (concurrency — a band sweeping across
-   the screen during a pan is not simultaneous flashing), and
-3. the window's **mean** luminance is itself flashing at that rate
-   (coherence — a dark limb swinging over a bright background flicks
-   individual pixels while the region's overall brightness barely moves).
-
-### How the 1024×768 reference is applied to other shapes
-
-WCAG's thresholds are defined for content filling a 1024×768 field of view —
-the 341×256 window is a tenth of *that* screen, standing in for the central
-ten degrees of vision. Real video is rarely 4:3, and the standard does not
-say what to do about it, so this is a judgement call and worth stating
-plainly.
-
-Unflash fits the frame inside the 1024×768 box by whichever dimension runs
-out first, and scales the window with it. So 4:3 content becomes 1024×768 and
-the window covers 33% × 33% of the picture; 16:9 content becomes 1024×576 and
-the window covers 33% × **44%**. The reading behind that is that a viewer
-sits so the picture's *width* fills their field of view, and a widescreen
-frame is simply shorter.
-
-The consequence is worth knowing: on widescreen content, flashing has to
-cover a taller share of the frame to be flagged than the same flashing would
-on 4:3. If you would rather err the other way, fitting by height instead
-(1365×768 for 16:9, window 25% × 33%) would flag more — change `screen_w` /
-`screen_h` in the detector profile, or ask and it can be made a setting.
-
-Calibrated against synthetic patterns (tests/): exactly 3 flashes/s passes
-WCAG, 4 fails; 15% window area passes, 35% fails; bright-only flicker
-passes; jittered multi-frame ramps fail; moving boxes, slow pans over
-high-contrast edges and swinging occluders (walking characters) pass; fast
-dense scrolling gratings (strobe-equivalent) fail. Validated on real anime:
-a 23-minute episode yields a handful of short, plausible flash windows
-(lightning strikes, a flash-cut OP montage) instead of blanket coverage.
-
-**Extended flashes** are the same hazard one step below the failure rate:
-flashing that satisfies *every* criterion above — swing, dark state,
-concurrency, area, mean coherence — at exactly the permitted rate (3
-flashes/s) rather than above it, recurring
-without a gap longer than a second for at least 5 s. WCAG passes that;
-ITC/Ofcom guidance treats sustained flashing at the limit as a hazard, and
-it still affects some viewers.
-
-The rate test is what keeps this honest. Anything the failure test rejects
-as motion rather than flashing — pans, cuts between light and dark shots,
-scrolling credits, blinks and mouth-flaps — is rejected here for the same
-reason, because a pixel crossed once by a moving edge does not flash three
-times a second. (An earlier version asked only that pixels had flashed
-*once* in the last second over a third of the area, which flagged ordinary
-dialogue scenes and scrolling end credits.)
-
-3 flashes/s is also the lowest rate at which the separation holds, which is
-why the strict profile does not flag extended flashes: its own limit is
-2 flashes/s, and at that rate scrolling credits and shot-cut dialogue are
-indistinguishable from flashing by per-pixel rate, area, swing or window-mean
-amplitude (measured: end credits qualified on 73% of frames against 48% for
-a genuinely flashing scene). Strict loses nothing by it — everything the
-default profile reports as an extended flash, strict fails outright.
-
-Three detection profiles are selectable in the header; the choice is used by
-every check, render verdict and verification:
-
-| Profile | WCAG thresholds | Extended flashes |
-| --- | --- | --- |
-| **Exact WCAG + flag extended flashes** (default) | exact | reported as violations: they get their own work sections (labelled *extended flash*), count in the safe/unsafe verdict, and **Suggest** tries to clear them |
-| **Exact WCAG only** | exact | not detected or reported at all — no warning, no marks |
-| **Stricter than WCAG** | tighter (0.08 swing, 1/5 area, 2 flashes/s — extra margin for photosensitive migraine) | not flagged separately — this profile already *fails* at 3 flashes/s |
-
-Because extended flashes are not WCAG failures, verdicts distinguish them: a
-section or exported file whose only remaining problems are extended flashes
-still passes WCAG, and the UI says so while marking it unsafe for the
-active profile.
-
-### The safe frame rate
-
-Every profile has a frame rate below which it cannot report flashing at all,
-and **Suggest: reduce FPS** thins a section down to it. Nothing about the
-pictures enters into it — only the frame timestamps — so it is the option
-that works when keep-light and keep-dark run out of road: on flashing with
-no consistent bright or dark phase to hold, on a section where holding
-either phase destroys more than dropping to a slideshow would, and on
-sources whose frames arrive too unevenly for any fixed rule.
-
-The bound is arithmetic. A pixel's brightness run reverses at most once per
-frame, and a picture merely held on screen again is not looked at, so every
-qualifying transition needs a *new picture* and a flash — a pair of
-opposing transitions — needs two. Reaching `k` flashes therefore takes at
-least `2(k-1)` frame intervals between the first flash and the last. Fit
-fewer than that many intervals into a second and the verdict is unreachable,
-whatever the frames contain:
-
-| Profile | flashes needed | frame intervals | safe rate |
-| --- | --- | --- | --- |
-| **Exact WCAG + flag extended flashes** | 3 (extended, at the limit) | 4 | 3.8 /s |
-| **Exact WCAG only** | 4 (more than 3) | 6 | 5.71 /s |
-| **Stricter than WCAG** | 3 (more than 2) | 4 | 3.8 /s |
-
-The quoted rates are ~5% under the whole numbers the arithmetic gives (4/s
-and 6/s), because a render can only place a picture on the nearest slot of
-its 100- or 120-per-second grid and a gap read back off the file can be a
-slot shorter than the one the editor laid out. They are then rounded *down*
-to two decimals, so the figure on the button is the figure the guarantee was
-worked out for and "is this rate still safe?" is a plain comparison rather
-than a question about rounding.
-
-### Choosing a different rate
-
-The safe rate is a worst case: it assumes every picture is the exact opposite
-of the one before it, over a quarter of the screen, for as long as you like.
-Almost nothing looks like that, and most flashing footage passes at a good
-many more frames than the bound allows — so the **▾** beside the button opens
-a box to set the rate yourself, and **safe rate** puts it back.
-
-Above the safe rate the result stops being a promise and becomes a proposal
-like keep-light and keep-dark: it is still checked before it comes back, and
-the toast says which of the two you got. A rate at or under the safe one
-holds however you edit around it; one above it was judged on the frames as
-they were, so re-check the section if you change anything near it.
-
-A practical way to use it: run it at the safe rate to see the section go
-green, then raise the rate until it goes red and step back. Every run
-replaces the previous one's removals, so there is nothing to undo in between.
-
-The suggester keeps the first frame, then the next frame at least that far
-along *in time*, and so on. On a variable-rate source — a downloaded
-livestream that runs at 60 fps through the action and stalls for a second
-here and there — keeping every nth frame would give a different rate in
-every passage; keeping the next frame far enough along in time gives the
-same rate throughout, and takes nothing out of a stall that was already slow
-enough.
-
-With *selection only* ticked it thins just the selected frames. Frames
-outside the selection are left alone and still set the pace, so the first
-survivor inside the selection is spaced from whatever really precedes it —
-but the guarantee covers only the span you selected, and flashing carried by
-full-rate frames on either side of it will still be reported.
-
-## Sections that close
-
-The point of a work section is that editing it until it passes should mean
-the exported video passes. Two things have to be true for that:
-
-**A section has to contain the frames responsible for its own violation.**
-A general-flash failure is more than three flashes in a second, so the
-detector can only announce one when the last of those flashes lands — up to
-a second after the flashing began. Padding a section out from the
-announcement therefore left the run-in that caused it outside the section,
-where nothing could be done about it. Every violation now carries an
-`onset`, the exact moment of the earliest transition still inside its
-failure window, and sections are padded from there. It adds about a second
-to the head of a section and creates no new ones.
-
-**A section's check has to see what a pass over the whole video sees.**
-The detector carries state: a flash is a pair of transitions up to a second
-apart, and the failure test looks back over a second of flashes. Checking a
-section on its own started it cold at the section's first frame, which left
-it blind for roughly its first second — flashing there passed the check and
-then turned up when the finished export was verified, "inside a section that
-was already safe". Preparing a section now also caches a few seconds of the
-footage before and after it, and the check, the suggester and the rendered
-section's verdict all run over run-up + section + run-out. Where that
-footage falls inside a *neighbouring* section, the neighbour's edited frames
-are used rather than the original ones, so a check never reports flashing
-you have already removed somewhere else. Flashing found in the run-out is
-reported separately: if it lands in the next section it is that section's to
-fix, and otherwise it is flagged as something your edits pushed past the end.
-Which side of a boundary a failure falls on is decided by where its *flashing*
-is, never by how far its onset reaches back — the onset exists to widen a
-section, and letting it decide ownership blames a section for flashing that
-starts after its last frame and then offers its final frames as the fix.
-
-Because a section's check now reads its neighbours' edits, editing one
-section clears the recorded verdict of any section close enough to have read
-it; they show as unchecked until you re-check.
-
-Sections prepared by an earlier version have no cached run-up. They still
-check, but cold — the check says so, and preparing them again fixes it.
-
-**A rendered file has to be read by its pictures, not by its frames.** A
-section is written onto a constant-rate grid, so a 24 fps section comes back
-at 120 fps with every picture written five times over. The hazard tests ask
-whether enough of the picture is flashing *at this instant*, so reading that
-file frame by frame asks five times as often as the check did -- and finds
-instants the check stepped over. That was the whole of a run of "passes the
-check, fails the preview" reports on 1080p footage: identical pictures at
-identical times, different sampling, opposite verdicts.
-
-Spotting the repeats by comparing frames does not undo it. They are not
-identical by the time they come back: x264 codes the first copy of a picture
-roughly and refines it over the copies that follow, so the later copies drift
-away from the first a little more each time, and on a 1080p render only about
-one repeat in seven survives as an exact match. So a rendered section is read
-at the times its own pictures go up, one frame each -- the sequence the check
-reasons about, with the pixels the render actually produced. A verify pass
-over the finished export does the same through each section and takes the
-untouched spans as they come, since those keep the source's rate.
-
-**A run-up only works if the detector's memory is finite.** It was not.
-The per-pixel tracker accumulates one monotonic run so that a flash ramping
-over a few frames still counts as a single transition, and until the pixel
-turns, the swing it will eventually report is measured from wherever that run
-began. On a slow drift — a fade, a scene brightening, exposure adjusting —
-a pixel can be mid-run for half a minute. Measured on real footage, a fifth
-of the picture was mid-run from more than six seconds earlier and some of it
-from twenty-six seconds earlier, so a check starting cold a few seconds
-before a section measured different swings than a pass over the whole video
-did. That is a section that passes its own check, fails when the export is
-verified, and passes again when you draw a fresh section over the very same
-frames and check that — with nothing you can edit to break the loop. A run is
-now re-anchored once it reaches `MAX_RUN_SECONDS`, which bounds the memory
-and makes the run-up length an honest promise. Nothing that slow was ever a
-flash: a flash is a pair of opposing changes inside a second, so a swing that
-took longer than that cannot be half of one.
-
-Violations are reported with their onset, their end, and the worst moment
-inside them, because a long flashing passage merges into one span and the
-span alone does not say where to look.
-
-## Messy real-world files
-
-Stream VODs and clipped videos often have broken timestamps: negative start
-times, variable frame rate, audio offset from video, or multi-second pts
-jumps that make a 3-second clip claim to be 26 seconds long. Unflash reads
-the *real* timeline from the packet index and bridges timestamp anomalies in
-both the edited sections **and** the untouched spans between them (reported
-as warnings, since bridging a jump makes the export shorter than the
-source's nominal duration). Audio and video durations are forced to match
-exactly in every part, and every part is written on one shared mp4 timescale
-— sections are constant-rate on the fine grid while untouched spans inherit
-the source's rate, so their timebases disagree by construction, and the
-concat demuxer does not reconcile that: it mis-stamps whatever disagrees
-with the first part, collapsing it to a few milliseconds and leaving a hole
-where it should have been. Parts rendered before this was pinned are
-remuxed (a stream copy) rather than re-rendered. The final concatenation is
-sanity-checked for span and gaps. Untouched spans keep the source's exact
-frame-to-frame timing throughout, VFR included. Sections work on the
-repaired timeline; frame identity is the ordinal within a section, with
-per-frame timestamps from ffmpeg's `showinfo` as ground truth.
-
-Because of all that, how densely a file samples its own footage varies: a
-rendered section carries three or four times the frames per second of the
-untouched material either side of it, and a screen or game capture can
-change rate from moment to moment. The detector is deliberately blind to
-this. It measures sustained flashing in seconds rather than in frames, it
-searches window positions continuously instead of only where frames happen
-to fall, and a frame that merely repeats the one before it is not counted as
-a fresh observation of anything. So the same footage gets the same verdict
-whether it is checked from the cache, rendered, or verified inside the
-finished export — which is what makes "every section passes" mean "the
-export passes". (Before this, the extended-flash test counted frames, so a
-rendered section outvoted its own neighbours four to one and could fail a
-check its source footage passed.)
-
-The render grid is chosen to carry the source's timing exactly where it can:
-100 slots a second divides 25 and 50, 120 divides 24, 30 and 60. The
-1000/1001 rates (23.976, 29.97, 59.94) divide neither and keep a residual of
-half a slot, about 4 ms, as does any variable-rate source. That is not
-harmless: the failure test counts flashes inside a hard one-second
-window, so a few milliseconds can decide whether the fourth flash falls
-inside it, and reading a rendered section on the file's own grid rather
-than on the timeline it was built to did fail sections that had passed
-their own checks. Everything that reads a render back therefore stamps
-each frame with its picture's time (see editing.pick_pictures), which is
-the timeline the check, the render verdict and the export verify all
-share. Where the source crowds two frames onto one slot -- a timestamp
-anomaly putting a pair microseconds apart, which ordinary stream VODs do
-contain -- both are still written, one borrowing a slot that the next frame
-with room hands back, so a marked frame never silently fails to reach the
-video and the run keeps its length.
-
-## Limitations — please read
-
-- **This is risk reduction, not a guarantee.** Passing the detector means
-  passing WCAG-style thresholds, not that content is safe for every person.
-- Static spatial patterns (fine stripes, gratings) can also trigger
-  photosensitive responses and are **not** detected.
-- Review flagged sections yourself before sharing; the player dims unedited
-  content by default as a courtesy, not a safeguard.
+If you want the detail: [DETECTION.md](DETECTION.md) covers what counts as a
+flash, how the thresholds are applied, why the safe frame rate is what it
+is, and why a section that passes its own check also passes in the finished
+file.

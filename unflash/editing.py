@@ -275,9 +275,9 @@ def prepare_section(project, sid, job=None):
     warnings = []
     if n_fixed:
         warnings.append(
-            f"{n_fixed} source timestamp anomalies were bridged "
-            "(this video's timestamps jump backwards or by several seconds); "
-            "output timing uses the repaired timeline.")
+            f"Bridged {n_fixed} timestamp glitches in the source (its "
+            "timestamps jump backwards or by several seconds). Output "
+            "timing uses the repaired timeline.")
     if n_thumbs != len(rel_pts):
         warnings.append(
             f"Thumbnail count ({n_thumbs}) != decoded frame count "
@@ -287,9 +287,9 @@ def prepare_section(project, sid, job=None):
     was = sec.get("n_frames") or 0
     if sec.get("prepared") and sec.get("edits") and was and was != len(rel_pts):
         warnings.append(
-            f"Re-prepared with {len(rel_pts)} frames where the marks were "
-            f"made against {was}; your marks were kept but now sit on "
-            "different frames — check them before rendering.")
+            f"Re-prepared with {len(rel_pts)} frames where the marks "
+            f"were made against {was}. They were kept, but they now sit on "
+            "different frames, so check them before rendering.")
     edits = sec.get("edits") or {}
     if shift:
         edits = {str(int(k) - shift): v for k, v in edits.items()
@@ -501,9 +501,9 @@ def _compose(project, sid, src, sec_start, t_lo, t_hi, need, ext_s, side,
             original(max(cursor, o["start"]), min(t_hi, o["end"]))
             where = "run-up" if side == "lead" else "run-out"
             notes.append(
-                f"Section #{o['id']} lies within this one's {where} but is "
-                "not prepared, so this check reads its original frames "
-                "— edits made there are not reflected here.")
+                f"Section #{o['id']} is inside this one's {where} but "
+                "is not prepared, so this check reads its original frames. "
+                "Edits made there are not included here.")
         cursor = max(cursor, o["end"])
     original(cursor, t_hi)
     return parts
@@ -559,17 +559,17 @@ def section_context(project, sid, ext_s=None):
         # no cache at all -- prepared by a version that did not keep one, or
         # the file has gone from the work folder
         notes.append(
-            "This section has no cached run-up, so its check starts cold at "
-            "its first frame and cannot see flashing in its opening second "
-            "— that is the flashing a verify of the whole export finds "
-            "inside a section that checked out safe. Prepare it again for a "
-            "full check.")
+            "This section has no cached run-up, so its check starts "
+            "cold and cannot see flashing in its opening second. That is "
+            "the flashing a verify of the whole export finds inside a "
+            "section that checked out safe. Prepare it again for a full "
+            "check.")
         ctx = ctx if isinstance(ctx, dict) else {}
     if ctx and (ctx.get("seconds") or 0) + 1e-6 < need:
         notes.append(
-            "The detection profile now needs a longer run-up than this "
-            "section was prepared with; prepare it again so its check sees "
-            "everything a pass over the whole export sees.")
+            "This profile needs a longer run-up than the section was "
+            "prepared with. Prepare it again so its check sees what a "
+            "verify of the whole export sees.")
 
     dt = _median_dt(sec.get("pts") or [])
     ts_min, ts_max = project.bounds
@@ -777,7 +777,7 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
     base = sim(base_edits)
     if base.safe:
         return {"edits": {}, "safe": True, "rounds": 0,
-                "note": "Already passes — nothing to remove."}
+                "note": "Already passes, nothing to remove."}
 
     removed = set()
 
@@ -846,9 +846,9 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
             note = f"Passes after removing {len(removed)} frames."
             break
     else:
-        note = (f"Still failing after {len(removed)} removals — "
-                + ("try widening the selection or edit manually."
-                   if only_set is not None else "needs manual attention."))
+        note = (f"Still failing after {len(removed)} removals. "
+                + ("Try widening the selection, or edit by hand."
+                   if only_set is not None else "Edit this one by hand."))
 
     return {
         "edits": {str(i): {"removed": True, "extended": False}
@@ -1010,23 +1010,23 @@ def suggest_frame_rate(project, sid, only=None, fps=None, job=None):
         # only be *checked*, and a check speaks for these frames, not for
         # every arrangement of them -- so re-editing around it can undo it,
         # where a run at the safe rate could not.
-        note += (f" That is above the guaranteed-safe {safe_fps:g}/s, so it "
-                 "passes on what these frames actually do rather than by "
-                 "arithmetic — re-check it if you edit around it.")
+        note += (f" That is above the guaranteed-safe {safe_fps:g}/s, so "
+                 "it passes on what these frames actually do rather than by "
+                 "arithmetic. Re-check it if you edit anywhere near it.")
     elif not result.safe:
         if not guaranteed:
-            note += (f" Still failing at a rate above the guaranteed-safe "
-                     f"{safe_fps:g}/s — drop to that and it cannot fail on "
+            note += (f" Still failing above the guaranteed-safe "
+                     f"{safe_fps:g}/s. Drop to that and it cannot fail on "
                      "the frames this was allowed to touch.")
         else:
             # The reduction can only govern the frames it was allowed to
             # touch. Anything left is flashing carried by pictures arriving
             # at full rate on one side or the other of that span.
-            note += (" Still failing — the flashing left runs "
-                     + ("outside the selection; widen it or run this on the "
-                        "whole section." if only_set is not None else
-                        "into the footage either side of this section, which "
-                        "this section's edits cannot reach."))
+            note += (" Still failing. The flashing that is left runs "
+                     + ("outside the selection. Widen it, or run this on "
+                        "the whole section." if only_set is not None else
+                        "into the footage either side of this section, "
+                        "which nothing in here can reach."))
 
     return {
         "edits": {str(i): {"removed": True, "extended": False}

@@ -223,7 +223,7 @@ async function refreshProject(openSid = null) {
   if (!p) return;
   const info = p.info;
   $("videoInfo").textContent =
-    `${p.video_path.split(/[\\/]/).pop()} — ${info.width}×${info.height}, ` +
+    `${p.video_path.split(/[\\/]/).pop()} · ${info.width}×${info.height}, ` +
     `${info.fps.toFixed(2)} fps, ${fmtTime(bounds()[1] - bounds()[0])}`;
   if (p.profile) $("profileSel").value = p.profile;
   setFpsHint(p.safe_fps, p.max_fps);
@@ -245,10 +245,9 @@ function showNotes(notes, recoverable) {
   const lines = (notes || []).map((n) => `<div>⚠ ${esc(n)}</div>`);
   const n = (recoverable || []).length;
   if (n) {
-    lines.push(`<div>⚠ This folder holds ${plural(n, "section folder", "section folders")} `
-      + `(#${recoverable.map(esc).join(", #")}) that the project file does not list — `
-      + `renders and proxies that are not part of the project. They can be rebuilt from `
-      + `what is on disk; frame marks cannot be brought back.</div>`);
+    lines.push(`<div>⚠ This folder has ${plural(n, "section folder", "section folders")} `
+      + `(#${recoverable.map(esc).join(", #")}) the project file does not know about. `
+      + `They can be rebuilt from what is on disk, but their frame marks are gone.</div>`);
   }
   $("bannerText").innerHTML = lines.join("");
   $("btnRecover").classList.toggle("hidden", !n);
@@ -257,17 +256,17 @@ function showNotes(notes, recoverable) {
 $("btnCloseBanner").onclick = () => $("banner").classList.add("hidden");
 
 $("btnRecover").onclick = async () => {
-  if (!confirm("Rebuild the unlisted section folders as sections?\n\n"
-    + "Time ranges are taken from the last export's part list (or the last scan). "
-    + "Existing full-res renders are kept and can be exported as they are, but the "
-    + "frame marks that produced them are gone.")) return;
+  if (!confirm("Rebuild the leftover section folders as sections?\n\n"
+    + "Their time ranges come from the last export, or failing that the last "
+    + "scan. The full-res renders are kept and can be exported as they are, "
+    + "but the frame marks that produced them are gone.")) return;
   try {
     const r = await api("/api/recover_sections", "POST", {});
     await refreshProject();
     showNotes(r.notes, r.recoverable);
     toast(r.recovered.length
       ? `Recovered ${plural(r.recovered.length, "section", "sections")}.`
-      : "Nothing could be recovered — see the message at the top.",
+      : "Nothing could be recovered. See the message at the top.",
       !r.recovered.length);
   } catch (e) { toast(e.message, true); }
 };
@@ -293,9 +292,9 @@ $("btnOpen").onclick = async () => {
   try {
     const path = await pickVideoPath();
     if (!path) return;
-    toast("Opening video… (large or unusual files can take a moment)");
+    toast("Opening video… large files can take a moment.");
     const res = await api("/api/open", "POST", { path });
-    await afterOpen(res, "Video opened. Run a scan to find problem sections.");
+    await afterOpen(res, "Video opened. Scan it to find the problem spots.");
   } catch (e) { toast(e.message, true); }
 };
 
@@ -354,11 +353,11 @@ $("profileSel").onchange = async () => {
     const prof = $("profileSel").value;
     const r = await api("/api/settings", "POST", { profile: prof });
     setFpsHint(r.safe_fps, r.max_fps);
-    let msg = "Detection profile changed — re-scan, then use the sidebar's "
-      + "'all sections' menu to re-prepare, re-check and refresh labels "
-      + "under it without losing your edits.";
+    let msg = "Profile changed. Re-scan, then use the sidebar's 'all "
+      + "sections' menu to re-prepare, re-check and refresh labels under the "
+      + "new one. Your edits are kept.";
     if (r.detector && r.detector.extended_mode === "off") {
-      msg += " This profile does not report extended flashes; sections already created for them stay until you delete them.";
+      msg += " This profile ignores extended flashes. Sections already made for them stay until you delete them.";
     }
     toast(msg);
   } catch (e) { toast(e.message, true); }
@@ -370,19 +369,19 @@ $("btnScan").onclick = async () => {
     pollJob(r.job, "Scanning", (res) => {
       let msg;
       if (res.safe) {
-        msg = "Scan complete: no violations found 🎉";
+        msg = "Scan complete: nothing to fix.";
       } else {
         const bits = [];
         if (res.violations) bits.push(plural(res.violations,
-          "WCAG violation window", "WCAG violation windows"));
+          "WCAG failure", "WCAG failures"));
         if (res.extended) bits.push(plural(res.extended,
           "extended flash", "extended flashes"));
         msg = `Scan complete: ${bits.join(" + ")}, `
           + `${plural(res.sections_created, "new section", "new sections")}.`;
         if (res.extended && !res.flag_extended) {
-          msg += " Extended flashes are informational under this profile (gray timeline marks, no sections).";
+          msg += " Extended flashes show as gray marks on the timeline under this profile, but get no sections.";
         } else if (res.extended) {
-          msg += " Extended flashes pass WCAG but are hazardous for some viewers — their sections are marked 'extended flash'.";
+          msg += " Extended flashes pass WCAG but are still a hazard for some viewers, so their sections are labeled 'extended flash'.";
         }
       }
       toast(msg);
@@ -442,7 +441,7 @@ function isMarginal(v) {
 function marginNote(v) {
   if (!isMarginal(v)) return "";
   return `  (only ${Math.round((v.count - 1) * 100)}% over the area `
-    + "threshold — just over the line)";
+    + "threshold, right on the line)";
 }
 
 // The failures themselves, not just how many of them. A section can run half
@@ -457,21 +456,21 @@ function violationLines(res) {
   return shown.map((v) => `${kindLabel(v.kind)} ${violationWhere(v)}`
     + marginNote(v)
     + (past.has(v.start)
-       ? " (past this section's last frame — fix it in the next section)" : ""));
+       ? " (past this section's last frame, so fix it in the next one)" : ""));
 }
 
 // Verdict on a rendered section, as a sentence: the count, then where.
 function renderVerdict(head, verdict) {
   const v = verdict || {};
   if (v.short_by) {
-    return `${head} — but the file stopped ${v.short_by} picture(s) short of `
-      + `the section, so this verdict only covers part of it. Render again.`;
+    return `${head}, but the file stopped ${v.short_by} picture(s) short of `
+      + `the section, so this verdict only covers part of it. Render it again.`;
   }
-  if (v.safe) return `${head} — passes the detector ✓`;
-  let msg = `${head} — still FAILS the detector (${violationPhrase(v)}): `
+  if (v.safe) return `${head}. Passes ✓`;
+  let msg = `${head}. Still fails (${violationPhrase(v)}): `
     + violationLines(v).join("; ");
   if ((v.flagged_frames || []).length) {
-    msg += `. "Select unsafe frames" will highlight the `
+    msg += `. "Select unsafe frames" highlights the `
       + `${v.flagged_frames.length} frames behind it.`;
   }
   return msg;
@@ -482,8 +481,8 @@ function renderVerdict(head, verdict) {
 function violationPhrase(res) {
   const { wcag, ext } = splitViolations(res);
   const bits = [];
-  if (wcag.length) bits.push(plural(wcag.length, "WCAG violation window",
-                                    "WCAG violation windows"));
+  if (wcag.length) bits.push(plural(wcag.length, "WCAG failure",
+                                    "WCAG failures"));
   if (ext.length && res.flag_extended)
     bits.push(plural(ext.length, "extended flash", "extended flashes"));
   return bits.join(" + ") || "no violations";
@@ -590,7 +589,7 @@ function renderSectionList() {
   const secs = Object.values(state.project.sections)
     .sort((a, b) => a.start - b.start);
   if (!secs.length) {
-    list.innerHTML = '<div style="color:var(--fg-dim);font-size:12px">No sections yet — run a scan, drag on the timeline, or type timestamps.</div>';
+    list.innerHTML = '<div style="color:var(--fg-dim);font-size:12px">No sections yet. Run a scan, drag on the timeline, or type times.</div>';
     return;
   }
   for (const s of secs) {
@@ -611,9 +610,9 @@ function renderSectionList() {
     // flashing the section's edits leave just past its own end: real in the
     // export, but no frame of this section can remove it
     if (s.check_after || s.check_spills)
-      badges.push(`<span class="badge warn" title="A failure reaches past this section's last frame — extend it, or edit the section after it">runs past end ⚠</span>`);
+      badges.push(`<span class="badge warn" title="A failure reaches past this section's last frame. Drag its end out, or edit the section after it.">runs past end ⚠</span>`);
     if ((s.check_context_notes || []).length)
-      badges.push('<span class="badge warn" title="Its check ran without the run-up frames, so it cannot see flashing in its opening second">prepare again ⚠</span>');
+      badges.push('<span class="badge warn" title="This check ran without its run-up frames, so it cannot see flashing in the section\'s opening second">prepare again ⚠</span>');
     if ((s.warnings || []).length) badges.push('<span class="badge warn">⚠ notes</span>');
     el.innerHTML = `<div class="times">#${s.id} · ${fmtTime(s.start)} – ${fmtTime(s.end)}</div>
       <div class="meta">${badges.join("")}</div>`;
@@ -697,9 +696,9 @@ async function reprepareAll() {
   const n = sectionCount();
   if (!n) { toast("No sections yet"); return; }
   if (!confirm(`Re-prepare all ${n} sections?\n\n`
-    + "Each one is analyzed again with the current detection profile and its "
-    + "proxy and thumbnails are rebuilt. Your frame marks are kept. This "
-    + "takes about as long as preparing them the first time.")) return;
+    + "Each one is analyzed again under the current profile. Your frame "
+    + "marks are kept. It takes about as long as preparing them did the "
+    + "first time.")) return;
   try {
     const r = await api("/api/prepare_all", "POST", { force: true });
     pollJob(r.job, "Re-preparing all sections", (res) => {
@@ -713,8 +712,8 @@ async function rerenderAll() {
   const n = sectionCount();
   if (!n) { toast("No sections yet"); return; }
   if (!confirm("Re-render every prepared section at full resolution?\n\n"
-    + "Sections already rendered with their current edits are rendered again "
-    + "too, so this can take a long time.")) return;
+    + "Sections that are already up to date get rendered again too, so this "
+    + "can take a long time.")) return;
   try {
     const r = await api("/api/render_all", "POST", { force: true });
     pollJob(r.job, "Re-rendering all sections", (res) => {
@@ -756,13 +755,13 @@ async function refreshAllLabels() {
         + r.cleared.join(", ") + ".");
     }
     if (r.unverified.length) {
-      notes.push("These verdicts do not record which detection settings "
-        + "produced them, so they were left as they are — re-render to be "
-        + "sure of them: " + r.unverified.join(", ") + ".");
+      notes.push("These verdicts do not say which settings produced them, so "
+        + "they were left alone. Re-render if you want to be sure of them: "
+        + r.unverified.join(", ") + ".");
     }
     showNotes(notes);
     toast(r.cleared.length
-      ? `Cleared ${plural(r.cleared.length, "stale label", "stale labels")} — see the message at the top.`
+      ? `Cleared ${plural(r.cleared.length, "stale label", "stale labels")}. See the message at the top.`
       : "Every label is up to date.");
   } catch (e) { toast(e.message, true); }
 }
@@ -866,7 +865,7 @@ $("btnApplyRange").onclick = async () => {
   if (!confirm("Changing the range resets this section's preparation, edits and renders. Continue?")) return;
   try {
     await api(`/api/section/${state.sectionId}`, "PATCH", { start: a, end: b, snap: false });
-    toast("Section range updated — re-prepare it.");
+    toast("Section range updated. Prepare it again.");
     await refreshProject(state.sectionId);
   } catch (e) { toast(e.message, true); }
 };
@@ -928,8 +927,8 @@ $("btnReprepare").onclick = async () => {
   if (!confirm(`Re-prepare section #${sid}?
 
 `
-    + "It is analyzed again with the current detection profile and its proxy "
-    + "and thumbnails are rebuilt. Your frame marks are kept.")) return;
+    + "It gets analyzed again under the current profile. Your frame marks "
+    + "are kept.")) return;
   try {
     const r = await api(`/api/section/${sid}/prepare`, "POST", {});
     pollJob(r.job, `Re-preparing section #${sid}`, () => {
@@ -956,15 +955,15 @@ $("btnDeleteSection").onclick = async () => {
 // ---------- player ----------
 function playerWarningText(which) {
   const dimmed = $("dimToggle").checked;
-  const dimNote = dimmed ? " Player is dimmed." : " Player is NOT dimmed — full brightness!";
+  const dimNote = dimmed ? " Player is dimmed." : " Player is NOT dimmed, full brightness.";
   if (which === "proxy") {
-    return "⚠ Unedited section — may contain flashing." + dimNote + " Play deliberately.";
+    return "⚠ Unedited section, may still contain flashing." + dimNote;
   }
   const s = state.section;
   const v = which === "preview" ? s.preview : s.render;
   const safe = v && v.verdict && v.verdict.safe;
-  return (safe ? "✓ This edited version passes the detector."
-               : "⚠ Edited version — has NOT passed (or not been checked by) the detector.") + dimNote;
+  return (safe ? "✓ This edited version passes."
+               : "⚠ Edited version, not passed or not yet checked.") + dimNote;
 }
 
 function setPlayerSource(which) {
@@ -1170,8 +1169,8 @@ $("btnSelectUnsafe").onclick = () => {
   updateGridClasses();
   const cell = $("frameGrid").children[frames[0]];
   if (cell) cell.scrollIntoView({ behavior: "smooth", block: "center" });
-  toast(`Selected ${frames.length} frames inside the failing window(s), `
-        + `from the ${from} verdict.`);
+  toast(`Selected ${frames.length} frames inside what is failing `
+        + `(from the ${from}).`);
 };
 
 document.addEventListener("keydown", (ev) => {
@@ -1403,35 +1402,35 @@ function refreshFpsUi() {
       + " pictures a second.";
     note.classList.add("warn");
   } else if (!safe) {
-    note.textContent = "This profile treats a single flash as a violation,"
-      + " so no rate is safe by arithmetic alone. Thinning still helps, but"
-      + " it is the check after it that decides.";
+    note.textContent = "This profile fails on a single flash, so no rate"
+      + " is safe by arithmetic. Thinning still helps, but the check"
+      + " afterwards is what decides.";
     note.classList.add("warn");
   } else if (v <= safe) {
-    note.textContent = `At or under ${fmtRate(safe)}/s no arrangement of`
-      + " frames can flash fast enough to fail this profile, so the result is"
-      + " safe by arithmetic — nothing about the pictures comes into it.";
+    note.textContent = `At or under ${fmtRate(safe)}/s, no arrangement of`
+      + " frames can flash fast enough to fail this profile. What is in the"
+      + " pictures does not come into it.";
     note.classList.remove("warn");
   } else {
     note.textContent = `Above the guaranteed-safe ${fmtRate(safe)}/s. Keeps`
-      + " more of the motion, and usually still passes — but on these frames"
-      + " rather than on every possible arrangement of them, so the check"
-      + " after it is what decides.";
+      + " more of the motion and usually still passes, but on these frames"
+      + " rather than on any frames, so the check afterwards is what"
+      + " decides.";
     note.classList.add("warn");
   }
   $("btnSuggestFps").title = ok
-    ? `Propose removals that thin the frames down to ${fmtRate(v)} pictures a `
-      + "second, from their timestamps alone — the pictures themselves are "
-      + "never looked at, so it works on variable-frame-rate sources and on "
-      + "flashing the other suggesters cannot shift. "
+    ? `Thin the frames down to ${fmtRate(v)} pictures a second, going on `
+      + "their timings alone. The pictures are never looked at, so it works "
+      + "on variable-frame-rate sources and on flashing the other two "
+      + "cannot shift. "
       + (!safe
-        ? "This profile has no rate that is safe by arithmetic — the "
-          + "check that follows decides."
+        ? "This profile has no rate that is safe by arithmetic, so the "
+          + "check afterwards decides."
         : v <= safe
         ? `At or under ${fmtRate(safe)}/s this profile cannot report flashing `
           + "at all. Use the arrow to keep more frames."
-        : `Above the guaranteed-safe ${fmtRate(safe)}/s — the check that `
-          + "follows decides. Use the arrow to go back to the safe rate.")
+        : `Above the guaranteed-safe ${fmtRate(safe)}/s, so the check `
+          + "afterwards decides. Use the arrow to go back to the safe rate.")
     : "Enter a valid rate first (use the arrow).";
 }
 
@@ -1472,36 +1471,36 @@ $("btnCheck").onclick = () => {
       if (state.section) state.section.check = res;
       updateUnsafeBtn();
       let msg = res.safe
-        ? "Passes the detector."
-        : `Fails: ${violationPhrase(res)} — use "select unsafe frames" to see them.`;
+        ? "Passes ✓"
+        : `Fails: ${violationPhrase(res)}. Use "select unsafe frames" to see where.`;
       if (!res.safe && res.wcag_safe) {
-        msg += " (No WCAG failure left — what remains is extended flashing.)";
+        msg += " (No WCAG failure left; what is still there is extended flashing.)";
       }
       const edge = (res.violations || []).filter(isMarginal);
       if (edge.length) {
         msg += " " + edge.map((v) => `${kindLabel(v.kind)} `
           + `${violationWhere(v)}${marginNote(v)}`).join("; ")
-          + ". Content this close to the threshold lands on either side of it "
-          + "depending on the encode, so the render and the exported file may "
-          + "well disagree with this; trim it a little further than looks "
-          + "necessary and it stops moving.";
+          + ". Flashing this close to the threshold can land either side of "
+          + "it depending on the encode, so the render and the exported file "
+          + "may well disagree with this. Trim a little further than looks "
+          + "necessary and it settles.";
       }
       // flashing the edits leave in the run-out: real in the export, but past
       // this section's last frame, so nothing here can remove it
       const after = res.after || [];
       if (after.length) {
-        msg += ` Also flashing just past the end of this section (`
+        msg += ` There is also flashing just past the end of this section (`
           + after.map(violationWhere).join(", ")
-          + `) — extend this section past it, or add one there.`;
+          + `). Drag the end out past it, or add a section there.`;
       }
       // a failure that starts inside the section but carries on past its last
       // frame: the frames on offer here may not be enough on their own
       const spills = res.spills || [];
       if (spills.length) {
-        msg += ` One or more of these carry on past the section's last frame (`
+        msg += ` Some of this carries on past the section's last frame (`
           + spills.map(violationWhere).join(", ")
-          + `); if removing the frames offered does not clear it, extend the `
-          + `section end or edit the following one.`;
+          + `). If removing the frames on offer does not clear it, drag the `
+          + `end out or edit the next section.`;
       }
       for (const note of (res.context_notes || [])) msg += " " + note;
       toast(msg, !res.safe || after.length > 0);
@@ -1548,11 +1547,11 @@ $("btnExport").onclick = () => {
   const secs = Object.values(p.sections).sort((a, b) => a.start - b.start);
   const lines = secs.map((s) => {
     let st;
-    if (!s.has_render) st = "❌ NOT RENDERED — use 'Render full-res' first";
-    else if (s.render_stale) st = "⚠ rendered, but edits changed since (re-render)";
-    else if (s.render_safe === true) st = "✓ rendered & safe";
-    else if (s.render_safe === false) st = "⚠ rendered but NOT safe";
-    else st = "• rendered, never checked by the detector (recovered)";
+    if (!s.has_render) st = "❌ not rendered yet, use 'Render full-res'";
+    else if (s.render_stale) st = "⚠ rendered, but edited since, render it again";
+    else if (s.render_safe === true) st = "✓ rendered and safe";
+    else if (s.render_safe === false) st = "⚠ rendered, but not safe";
+    else st = "• rendered, never checked (recovered)";
     return `#${s.id} · ${fmtTime(s.start)}–${fmtTime(s.end)}: ${st}`;
   });
   $("exportSummary").innerHTML =
@@ -1580,15 +1579,15 @@ function renderExportExisting() {
   const had = !!exp.path;
   $("btnVerifyExport").disabled = !had;
   if (!had) {
-    ex.textContent = "No export on record yet. “Verify exported "
-      + "file” becomes available once one has been made.";
+    ex.textContent = "Nothing exported yet. “Verify exported file” "
+      + "switches on once there is one.";
   } else {
     const v = exp.verify;
     const said = !v ? "not verified yet"
       : v.safe ? "last verify: passed" + String.fromCharCode(32, 10003)
       : "last verify: FAILED (" + violationPhrase(v) + ")";
-    ex.textContent = "Already exported to " + exp.path + " — " + said
-      + ". “Verify exported file” re-scans that file; it does not "
+    ex.textContent = "Already exported to " + exp.path + ", " + said
+      + ". “Verify exported file” re-scans that file, it does not "
       + "export again.";
   }
 }
@@ -1603,22 +1602,21 @@ async function refreshExportPlan() {
   try {
     const r = await api("/api/export_plan?mode=" + encodeURIComponent(mode));
     if (mode.endsWith("-filter")) {
-      let txt = `Filter join: decodes and re-encodes the whole video once ` +
-        `(one extra generation, ~45 dB PSNR — visually invisible). ` +
-        `${r.parts} parts, command ${r.chars} of ${r.limit} characters.`;
+      let txt = `One pass over the whole video, so one more encode than ` +
+        `the other modes (you will not see it). ${plural(r.parts, "part", "parts")}.`;
       if (r.batches > 1) {
-        txt += ` ⚠ That is more than one ffmpeg command can name, so the ` +
-          `export will be assembled in ${r.batches} batches and those joined ` +
-          `by stream copy — still only one re-encode generation, but slower.`;
+        txt += ` ⚠ That is more parts than one ffmpeg command can name, ` +
+          `so the export gets built in ${r.batches} batches and those joined ` +
+          `by copying. Still only one extra encode, but slower.`;
         el.className = "hint warn";
       }
       el.textContent = txt;
     } else if (mode === "smartcut") {
       el.textContent = `Untouched spans are copied, not re-encoded. ` +
-        `${r.parts} parts. Needs keyframe-aligned sections.`;
+        `${plural(r.parts, "part", "parts")}. Needs keyframe-aligned sections.`;
     } else {
-      el.textContent = `Stream-copy join: no re-encode at the join, ` +
-        `so no quality loss. ${r.parts} parts.`;
+      el.textContent = `Joined without re-encoding, so no quality lost ` +
+        `at the joins. ${plural(r.parts, "part", "parts")}.`;
     }
   } catch (e) { el.textContent = ""; }
 }
@@ -1633,7 +1631,7 @@ $("btnDoExport").onclick = async () => {
     pollJob(r.job, "Exporting", (res) => {
       let txt = `Exported to ${res.path}\n`;
       for (const w of res.warnings || []) txt += `⚠ ${w}\n`;
-      txt += 'Run "Verify exported file" to re-scan it.';
+      txt += 'Press "Verify exported file" to re-scan it.';
       $("exportResult").textContent = txt;
       // the job result is the export record the project just saved; put
       // it on state.project so the dialog (and the verify button) stop
@@ -1656,7 +1654,7 @@ $("btnVerifyExport").onclick = async () => {
       const build = res.build
         ? ` [build ${new Date(res.build * 1000).toLocaleString()}]` : "";
       if (res.safe) {
-        txt = `✓ Exported file passes the detector (profile: ${res.profile})`
+        txt = `✓ The exported file passes (profile: ${res.profile})`
           + `${build}.`;
       } else {
         // `where` is worked out server-side from the layout the export
@@ -1671,7 +1669,7 @@ $("btnVerifyExport").onclick = async () => {
             where = `in section #${w.section}, at ${fmtTime(w.at)} on its `
               + "own timeline";
           } else if (w.src != null) {
-            where = `in material no section covers (${fmtTime(w.src)} of the `
+            where = `outside every section (${fmtTime(w.src)} of the `
               + "source)";
           } else {
             where = "at a time the export's own layout does not cover";
@@ -1681,25 +1679,24 @@ $("btnVerifyExport").onclick = async () => {
           const from = x.where_start;
           if (from) {
             where += from.section != null
-              ? `, beginning in section #${from.section} at ${fmtTime(from.at)}`
-              : ", beginning in material no section covers";
+              ? `, starting in section #${from.section} at ${fmtTime(from.at)}`
+              : ", starting outside every section";
           }
-          return `  • ${kindLabel(x.kind)} ${violationWhere(x)} — ${where}`
+          return `  • ${kindLabel(x.kind)} ${violationWhere(x)}, ${where}`
             + marginNote(x);
         });
-        txt = `✗ Exported file still fails (profile: ${res.profile})`
+        txt = `✗ The exported file still fails (profile: ${res.profile})`
           + `${build}:\n` + rows.join("\n");
         const inSection = shown.filter((x) => x.where && x.where.section != null);
         if (shown.some((x) => x.where && x.where.section == null)) {
-          txt += "\nTimes no section covers need one: add a section over "
-            + "them, prepare it, edit it, then re-render and re-export.";
+          txt += "\nAnything outside a section needs one: add a section "
+            + "over it, prepare it, edit it, then render and export again.";
         }
         if (inSection.length) {
-          txt += "\nTimes inside a section: open it and run Check Safety at "
-            + "the time given. The check reads the same frames on the same "
-            + "timeline the render lays down, so the two should agree; where "
-            + "they do not, this export was built from an older render of "
-            + "that section — render it full-res again and re-export.";
+          txt += "\nFor anything inside a section, open it and run Check "
+            + "safety at the time given. The two should agree. If they do "
+            + "not, this export was built from an older render of that "
+            + "section, so render it full-res again and export again.";
           const notes = new Set();
           for (const x of inSection) {
             const sec = (state.project.sections || {})[x.where.section];
@@ -1708,23 +1705,21 @@ $("btnVerifyExport").onclick = async () => {
           for (const n of notes) txt += "\n" + n;
         }
         if (shown.some((x) => x.where && x.where.inferred)) {
-          txt += "\nThis export was made before the tool recorded its own "
+          txt += "\nThis export predates Unflash recording its own "
             + "layout, so the places above were worked back from the "
-            + "sections as they stand now. Re-cutting a section since the "
-            + "export would put them out; export again to have them read "
-            + "off the file itself.";
+            + "sections as they stand now. If you have re-cut a section "
+            + "since, they will be out. Export again to fix that.";
         }
         if (shown.some(isMarginal)) {
-          txt += "\nA failure marked as just over the line is flashing at "
-            + "almost exactly the threshold, and an export is re-encoded: "
+          txt += "\nA failure marked as right on the line is flashing at "
+            + "almost exactly the threshold. An export is re-encoded, and "
             + "that alone moves the measurement by a few percent, so the "
-            + "same footage can pass a check and fail the exported file. "
-            + "Editing it until it has real margin is what settles it — "
-            + "trimming a little more than looks necessary.";
+            + "same footage can pass a check and fail here. Trimming a "
+            + "little more than looks necessary is what settles it.";
         }
         if (res.wcag_safe) {
-          txt += "\nThese pass WCAG but are extended flashes — "
-            + "hazardous for some viewers under this profile.";
+          txt += "\nThese pass WCAG, but they are extended flashes and "
+            + "still a hazard for some viewers under this profile.";
         }
       }
       $("exportResult").textContent = txt;
@@ -1767,9 +1762,9 @@ async function quitUnflash(force) {
 
 $("btnQuit").onclick = () => {
   if (!confirm("Stop Unflash?\n\nYour project is saved as you go, so "
-               + "nothing is lost. Use this rather than just closing the tab "
-               + "- especially after an update, which cannot take effect "
-               + "until Unflash has really stopped.")) return;
+               + "nothing is lost. Use this rather than just closing the "
+               + "tab, especially after an update: a new version cannot "
+               + "take effect until Unflash has really stopped.")) return;
   quitUnflash(false);
 };
 
@@ -1790,9 +1785,9 @@ async function checkServerFreshness() {
     if (!el) return;
     if (!info || !info.stale) { el.classList.add("hidden"); return; }
     const when = new Date(info.source_now * 1000).toLocaleString();
-    el.textContent = "This server started before the code it is running was "
-      + `last changed (${when}), and launching Unflash again does not reload `
-      + "it \u2014 close Unflash completely, then start it again.";
+    el.textContent = "This copy of Unflash started before the code was "
+      + `last changed (${when}), and launching it again will not reload it. `
+      + "Press Quit, then start it again.";
     el.classList.remove("hidden");
   } catch (e) { /* not fatal: the app works, it may just be out of date */ }
 }

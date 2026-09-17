@@ -348,10 +348,10 @@ def render_section(project, sid, source, out_path, job=None,
     notes = []
     if shift:
         notes.append(
-            f"This decode began {shift:+d} frame(s) from the one the section "
-            "was prepared with, so the marks were realigned onto the cached "
-            "frames — the picture matches the editor. Re-prepare the section "
-            "to settle it.")
+            f"This decode began {shift:+d} frame(s) from the one the "
+            "section was prepared with, so the marks were realigned onto "
+            "the cached frames and the picture matches the editor. Prepare "
+            "the section again to settle it.")
     if n_expected and n_got != n_expected:
         notes.append(
             f"Decoded {n_got} frames but section was prepared with "
@@ -372,9 +372,9 @@ def render_section(project, sid, source, out_path, job=None,
         if short:
             verdict["short_by"] = short
             notes.append(
-                f"The rendered file ran out {short} picture(s) before the "
-                "section's timeline does, so this verdict only covers the "
-                "part of the section it reached. Render it again.")
+                f"The rendered file ran out {short} picture(s) before "
+                "the end of the section, so this verdict only covers the "
+                "part it reached. Render it again.")
             warn = " ".join(notes)
 
     entry = {"path": out_path, "verdict": verdict, "warning": warn,
@@ -844,8 +844,8 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
     stale = [s["id"] for s in sections if project.render_stale(s)]
     if stale:
         warnings.append(
-            "Sections rendered before their latest edits (re-render to "
-            "include them): #" + ", #".join(stale))
+            "These sections were rendered before their latest edits. "
+            "Render them again to include those: #" + ", #".join(stale))
     if mode == "smartcut":
         if info["video_codec"] not in ("h264",):
             raise RuntimeError(
@@ -930,15 +930,15 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
 
     if bridged > 0.5:
         warnings.append(
-            f"{bridged:.1f}s of source timestamp anomalies were bridged in "
-            "the untouched spans (this video's timestamps jump); the export "
-            "is correspondingly shorter than the source's nominal duration.")
+            f"Bridged {bridged:.1f}s of timestamp glitches in the "
+            "untouched spans (this video's timestamps jump), so the export "
+            "is that much shorter than the source claims to be.")
     elif mode == "smartcut" and (project.data.get("index") or {}).get(
             "discontinuities"):
         warnings.append(
-            "The source has timestamp discontinuities and smart-cut copies "
-            "untouched spans as-is, so they carry through to the export. "
-            "Re-encode mode repairs them.")
+            "The source has timestamp gaps, and smart-cut copies "
+            "untouched spans as they are, so those gaps carry through to "
+            "the export. The re-encode modes repair them.")
 
     anchors = _part_anchors(plan, ts_min)
     encoded = [ffio.stream_duration(f) for f in files]
@@ -973,10 +973,10 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
     off = sum(e - w for e, w in zip(encoded, wanted) if e > w)
     if off > 0.25:
         warnings.append(
-            f"The parts run {off:+.2f}s longer than the source's own timing. "
-            "Sections rendered by an older version of the tool are slightly "
-            "too long; re-render them ('Render full-res') and export again "
-            "to get the timing exact.")
+            f"The parts run {off:+.2f}s longer than the source's own "
+            "timing. Sections rendered by an older version come out "
+            "slightly too long. Render them full-res again and export "
+            "again to get the timing exact.")
 
     if info["has_audio"]:
         prog(0.95, "adding audio")
@@ -1042,19 +1042,19 @@ def _timing_sanity(path, part_files, expected):
     # percentage-of-runtime tolerance is wide enough to swallow all of it
     if expected and abs(got - expected) > max(0.25, expected * 0.002):
         warnings.append(
-            f"Output video span {got:.1f}s differs from the sum of its "
-            f"parts {expected:.1f}s — concatenation misaligned the streams; "
-            "check the file for frozen spans.")
+            f"The output runs {got:.1f}s where its parts add up to "
+            f"{expected:.1f}s. The join misaligned the streams, so check "
+            "the file for frozen stretches.")
     new_holes = idx.get("holes", 0) - part_holes
     if new_holes > 0:
         warnings.append(
-            f"Output has {new_holes} video gap(s) that none of its parts "
-            "have — the join inserted them, and the video freezes there. "
-            "Re-export with 'filter' assembly if this persists.")
+            f"The output has {new_holes} video gap(s) that none of its "
+            "parts have, so the join put them there and the video freezes "
+            "at each one. Try the one-pass join mode if it keeps happening.")
     if idx["discontinuities"]:
         warnings.append(
-            f"Output has {idx['discontinuities']} timestamp gap(s) >5s — "
-            "players may freeze there; check the file.")
+            f"The output has {idx['discontinuities']} timestamp gap(s) "
+            "over 5s. Players may freeze there, so check the file.")
     return warnings
 
 
