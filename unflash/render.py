@@ -933,12 +933,13 @@ def export_video(project, out_path, mode="reencode", assembly="copy",
             f"Bridged {bridged:.1f}s of timestamp glitches in the "
             "untouched spans (this video's timestamps jump), so the export "
             "is that much shorter than the source claims to be.")
-    elif mode == "smartcut" and (project.data.get("index") or {}).get(
-            "discontinuities"):
+    elif mode == "smartcut" and (src_idx.get("discontinuities")
+                                 or src_idx.get("duplicates")):
         warnings.append(
-            "The source has timestamp gaps, and smart-cut copies "
-            "untouched spans as they are, so those gaps carry through to "
-            "the export. The re-encode modes repair them.")
+            "The source's timestamps are uneven -- it has gaps, or frames "
+            "sharing one instant -- and smart-cut copies untouched spans as "
+            "they are, so that timing carries through to the export. The "
+            "re-encode modes repair it.")
 
     anchors = _part_anchors(plan, ts_min)
     encoded = [ffio.stream_duration(f) for f in files]

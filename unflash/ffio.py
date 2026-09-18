@@ -129,10 +129,15 @@ def index_video(path, progress=None):
     if not all_pts:
         return {"keyframes": [], "ts_min": 0.0, "ts_max": 0.0,
                 "median_delta": 1.0 / 30, "n_packets": 0,
-                "discontinuities": 0, "holes": 0}
+                "discontinuities": 0, "holes": 0, "duplicates": 0}
     all_pts.sort()
     arr = np.asarray(all_pts)
     deltas = np.diff(arr)
+    # Timestamps that do not advance at all: two pictures claiming the same
+    # instant, which MKV remuxes produce readily. Counted here, before the
+    # zero deltas are dropped on the next line, because a stream-copy export
+    # hands them to the muxer exactly as they are.
+    dupes = int(np.count_nonzero(deltas <= 1e-9)) if len(deltas) else 0
     deltas = deltas[deltas > 1e-9]
     med = float(np.median(deltas)) if len(deltas) else 1.0 / 30
     disc = int(np.count_nonzero(deltas > 5.0)) if len(deltas) else 0
@@ -147,6 +152,7 @@ def index_video(path, progress=None):
         "n_packets": len(all_pts),
         "discontinuities": disc,
         "holes": holes,
+        "duplicates": dupes,
     }
 
 
@@ -409,10 +415,25 @@ def make_thumbnails(path, out_dir, start, duration, thumb_w, progress=None,
     """Dump one JPEG per frame of the section (ordinal-aligned with decode)."""
     os.makedirs(out_dir, exist_ok=True)
     pattern = os.path.join(out_dir, "%06d.jpg")
+    # `setpts=N` re-stamps each frame one timebase tick after the one before
+    # it, throwing the source's own timing away. These JPEGs are addressed by
+    # ordinal and never by time, so their timestamps carry no information --
+    # but the mjpeg encoder refuses a frame whose pts does not advance
+    # ("Invalid pts (n) <= last (n)"), and the image2 muxer refuses the same
+    # in dts, and plenty of MKVs do hand out repeated timestamps. Under
+    # -fps_mode passthrough the output timebase *is* the filter timebase, so
+    # one tick apart is always strictly increasing whatever the source's
+    # timebase is.
+    #
+    # Note -fps_mode vfr would also silence the muxer, by *dropping* the
+    # frames whose timestamps repeat -- which shifts every thumbnail after
+    # the first duplicate off the frame it is meant to show. Every frame has
+    # to survive here, because the grid, the marks and the render all address
+    # frames by ordinal.
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-y",
            "-ss", f"{start:.6f}", "-t", f"{duration:.6f}", "-i", path,
            "-map", "0:v:0", "-an",
-           "-vf", f"scale={thumb_w}:-2",
+           "-vf", f"scale={thumb_w}:-2,setpts=N",
            "-fps_mode", "passthrough",
            "-q:v", "5", "-start_number", "0",
            pattern]
