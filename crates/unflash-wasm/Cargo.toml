@@ -1,0 +1,23 @@
+[package]
+name = "unflash-wasm"
+description = "wasm-bindgen bindings for Unflash: detector (WebGPU or CPU), MP4 demux/mux, editing helpers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+unflash-core = { path = "../unflash-core" }
+unflash-gpu = { path = "../unflash-gpu" }
+unflash-mp4 = { path = "../unflash-mp4" }
+unflash-h264 = { path = "../unflash-h264" }
+wasm-bindgen = "0.2.128"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlVideoElement", "VideoFrame", "DomRectReadOnly", "OffscreenCanvas"] }
+serde.workspace = true
+serde_json.workspace = true
+console_error_panic_hook = "0.1"

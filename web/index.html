@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unflash</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230d0d0d'/%3E%3Cpath d='M9.5 1.5 4 9h3.5L6.5 14.5 12 7H8.5z' fill='%23e4e4e4'/%3E%3Cpath d='M2 14 14 2' stroke='%230d0d0d' stroke-width='3'/%3E%3Cpath d='M2 14 14 2' stroke='%23e4e4e4' stroke-width='1.2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand" title="Unflash: WebGPU and WebAssembly">Unflash</div>
+  <button id="btnHome" title="Show or hide the guide (it opens beside your work, and Esc closes it)">Guide</button>
+  <button id="btnChanges" title="What has changed in Unflash, newest first">What's new<span id="changesDot" class="new-dot hidden"></span></button>
+  <button id="btnUpdate" class="hidden" title="A newer version of Unflash is published: reload the page to use it. Your sections and marks come back when you open the video again.">new version: reload</button>
+  <label class="filebtn primary"><input type="file" id="fileInput" autocomplete="off" accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.3gp,.ts,.m2ts,.mts">Open video…</label>
+  <div id="videoInfo" class="video-info"></div>
+  <div class="spacer"></div>
+  <label class="profile-label">Profile
+    <select id="profileSel" title="What counts as a problem. Extended flashes and hazardous stripe patterns are not WCAG failures, but they still affect some viewers.">
+      <option value="wcag_ext">WCAG + extended flashes + stripe patterns (default)</option>
+      <option value="wcag">Exact WCAG only</option>
+      <option value="strict">Stricter than WCAG</option>
+    </select>
+  </label>
+  <label class="toggle" title="When a video is opened: after the scan, also fix every section, export the result and check it, unattended. A starting point: it picks frames to remove by brightness alone and can drop a subtitle or an image that matters, so editing by hand gives better results."><input type="checkbox" id="autoToggle"> auto-fix</label>
+  <button id="btnScan" disabled title="Decode every frame with WebCodecs and run the detector over it, as fast as the GPU goes">Scan for flashes &amp; patterns</button>
+  <label class="toggle" title="Show the meter over the player: how much of the picture is flashing on the frame on screen"><input type="checkbox" id="liveToggle" disabled> live monitor</label>
+  <button id="btnExport" disabled>Export…</button>
+  <span class="alerts-wrap">
+    <button id="btnProject" disabled title="Save the project (sections, marks, the scan) to a file, or load one">Project…</button>
+    <div id="projectMenu" class="menu project-menu hidden">
+      <p class="fps-note">Sections, marks and the scan are kept in this browser as you work, and come back when you open the same video here again. A project file keeps them anywhere: another browser or computer, or after this site's data is cleared.</p>
+      <button id="btnProjectSave" class="small" title="Download the project as a file (JSON) you can load later">save a project file…</button>
+      <label class="filebtn small" title="Load a project file saved for the open video: its sections and marks replace the ones here">load a project file…<input type="file" id="projectInput" autocomplete="off" accept=".json,application/json"></label>
+      <p id="projectNote" class="fps-note"></p>
+    </div>
+  </span>
+  <span class="alerts-wrap">
+    <button id="btnAlerts" title="A beep, and if you like a system notification, when a long job (opening, scanning, preparing, exporting, verifying) finishes">Alerts</button>
+    <div id="alertsMenu" class="menu alerts-menu hidden">
+      <label class="toggle"><input type="checkbox" id="alertBeep"> beep when a job that ran for over</label>
+      <div class="fps-row"><input type="number" id="alertAfter" min="0" max="7200" step="5"><span>seconds finishes</span></div>
+      <label class="toggle"><input type="checkbox" id="alertNotify"> also a system notification while this tab is in the background</label>
+      <p id="alertNote" class="fps-note"></p>
+      <button id="btnAlertTest" class="small">test the beep</button>
+    </div>
+  </span>
+</header>
+
+<div id="banner" class="banner hidden"><div id="bannerText"></div><button id="btnCloseBanner" class="small">dismiss</button></div>
+
+<div id="jobbar" class="jobbar hidden">
+  <div class="jobname" id="jobName"></div>
+  <div class="progress"><div class="bar" id="jobBar"></div></div>
+  <div id="jobMsg" class="jobmsg"></div>
+  <button id="btnCancelJob" class="small danger">cancel</button>
+</div>
+
+<div id="auto" class="auto hidden">
+  <span class="auto-title" title="The unattended run: scan, fix every section, export, check the export">Auto-fix</span>
+  <span id="autoSteps" class="auto-steps"></span>
+  <span id="autoSummary" class="auto-summary"></span>
+  <span class="spacer"></span>
+  <a id="autoDownload" class="button primary hidden" download>Download fixed video</a>
+  <button id="btnAutoStop" class="small danger hidden" title="Stop the run; every step can still be done by hand">stop</button>
+  <button id="btnAutoRerun" class="small hidden" title="Scan again and redo the fixes under the current profile">run again</button>
+</div>
+
+<div id="timelineWrap" class="timeline-wrap hidden">
+  <canvas id="timeline" height="64"></canvas>
+  <div class="timeline-row">
+    <div class="timeline-hint">Problems across the whole video: orange for general flashes, magenta for red ones, teal for stripe patterns; the thin trace is what the live monitor saw. Numbered boxes are sections; click one to open it. Drag on an empty stretch to add a section, or type times:</div>
+    <span class="addsec">
+      <input type="text" id="addStart" placeholder="start (e.g. 1:23.5)" size="12">
+      <input type="text" id="addEnd" placeholder="end" size="12">
+      <button id="btnAddSection" class="small">add section</button>
+    </span>
+  </div>
+</div>
+
+<main>
+  <aside id="sections" class="hidden">
+    <div class="side-head">
+      <h2>Sections</h2>
+      <button id="btnPrepareAll" class="small" title="Prepare every section that isn't prepared yet">prepare all</button>
+      <button id="btnCheckAll" class="small" title="Re-run the instant check on every prepared section">check all</button>
+      <button id="btnDeleteAll" class="small danger" title="Delete every section, including their marks">delete all</button>
+    </div>
+    <div id="sectionList" class="section-list"></div>
+  </aside>
+
+  <section id="stage" class="hidden">
+    <div class="players">
+      <div class="player-box" id="playerBox">
+        <div class="player-head">
+          <select id="playerSource" title="What the player shows: the open section with your marks applied, the same section as it is, or the whole video">
+            <option value="edited">section, edited</option>
+            <option value="original">section, original</option>
+            <option value="video">whole video</option>
+          </select>
+          <label class="dim-toggle" title="Darken the pictures of the video: the player, the frames in the grid and the frame at full size. A courtesy, not a safeguard."><input type="checkbox" id="dimToggle" checked> dim</label>
+          <span class="size-switch" title="Player size">
+            <button class="small" data-size="s" title="small player">S</button><button class="small" data-size="m" title="medium player">M</button><button class="small" data-size="l" title="large player">L</button>
+          </span>
+          <span class="spacer"></span>
+          <span id="liveVerdict" class="live-verdict idle">monitor off</span>
+        </div>
+        <div id="playerWarning" class="player-warning"></div>
+        <div class="player-wrap">
+          <video id="player" controls preload="metadata" playsinline></video>
+          <canvas id="preview" class="hidden" width="640" height="360"></canvas>
+          <div id="hud" class="hud hidden">
+            <div class="hud-row"><span class="hud-label">flash area</span><div class="hud-bar"><div id="hudHaz" class="hud-fill"></div><div class="hud-mark" title="area threshold"></div></div><span id="hudHazText" class="hud-val">0%</span></div>
+            <div class="hud-row"><span class="hud-label">red flash</span><div class="hud-bar"><div id="hudRed" class="hud-fill red"></div><div class="hud-mark"></div></div><span id="hudRedText" class="hud-val">0%</span></div>
+            <div class="hud-row"><span class="hud-label">stripes</span><div class="hud-bar"><div id="hudPat" class="hud-fill pat"></div><div class="hud-mark" title="pattern area threshold"></div></div><span id="hudPatText" class="hud-val">0%</span></div>
+            <div class="hud-row small"><span id="hudInfo"></span></div>
+          </div>
+        </div>
+        <div id="previewBar" class="preview-bar hidden">
+          <button id="btnPreviewPlay" class="small primary" title="Play the section in the player (from the selected frame, if one is selected)">▶ play</button>
+          <button id="btnPreviewStop" class="small" title="Stop and go back to the section's first frame">■</button>
+          <label class="toggle" title="Start again at the end"><input type="checkbox" id="previewLoop"> loop</label>
+          <select id="previewSpeed" title="Playback speed">
+            <option value="1">1×</option>
+            <option value="0.5">½×</option>
+            <option value="0.25">¼×</option>
+          </select>
+          <button id="btnPreviewSound" class="small sound-toggle" aria-pressed="false" title="Play the section's sound too (off to start with). Held frames are silent while they wait, as in the export.">sound off</button>
+          <span id="previewInfo" class="preview-info"></span>
+        </div>
+      </div>
+      <div class="chart-box">
+        <div class="chart-head">
+          <span id="chartTitle" class="chart-title"></span>
+          <span class="spacer"></span>
+          <span id="chartSpan" class="size-switch hidden" title="How much of the video the chart shows, around the playhead">
+            <button class="small" data-span="10">10 s</button><button class="small" data-span="30">30 s</button><button class="small" data-span="120">2 min</button><button class="small" data-span="0">all</button>
+          </span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart" height="200"></canvas>
+          <div id="chartTip" class="chart-tip hidden"></div>
+        </div>
+        <div class="chart-hint" id="chartHint">Open a video to see its flashing over time.</div>
+      </div>
+    </div>
+
+    <section id="workspace" class="hidden">
+      <div class="ws-head">
+        <h2 id="wsTitle"></h2>
+        <span id="wsVerdict" class="verdict"></span>
+        <div class="spacer"></div>
+        <span class="range-edit">
+          <input type="text" id="secStart" size="10" title="section start">
+          –
+          <input type="text" id="secEnd" size="10" title="section end">
+          <button id="btnApplyRange" class="small" title="Change this section's time range (resets preparation and marks)">apply range</button>
+        </span>
+        <button id="btnReprepare" class="small" title="Decode this section again under the current profile. Your marks are kept.">re-prepare</button>
+        <button id="btnDeleteSection" class="small danger">delete section</button>
+      </div>
+      <div id="wsWarnings" class="ws-warnings hidden"></div>
+      <div id="wsFindings" class="ws-findings hidden"></div>
+      <div id="wsUnprepared" class="panel hidden">
+        <p>This section isn't prepared yet. Preparing decodes its frames (plus a run-up and run-out) into memory so every edit can be checked instantly.</p>
+        <button id="btnPrepare" class="primary">Prepare section</button>
+      </div>
+      <div id="wsBody" class="hidden">
+        <div class="toolbar">
+          <span class="group">
+            <button id="btnSuggestLight" title="Propose removals that hold the brighter frames">Suggest: keep light</button>
+            <button id="btnSuggestDark" title="Propose removals that hold the darker frames">Suggest: keep dark</button>
+            <button id="btnSuggestFewest" title="Remove as few frames as it can: takes out whichever of the light or dark frames are fewer, then puts back as many flashes as the rules allow (no more than three a second, fewer if the profile still objects), and where a picture would still freeze for half a second or more, lets frames back in at a rate that cannot flash, checking each try">Suggest: fewest removals</button>
+            <button id="btnSuggestBlend" title="Blend each flashing frame (whichever of the light or dark ones are fewer) with the frames either side of it, as little as passes the check and a little more: the contrast of the flash, from frame to frame, goes down, not the picture's, so what stays still stays sharp. Nothing is removed and the timing stays; removals in reach make way for it. (Turning the picture itself down towards grey would take away nearly all of it before a full-screen flash passed.)">Suggest: blend frames</button>
+            <span class="split">
+              <button id="btnSuggestFps" title="Thin the section to fewer pictures a second: starts at twice the rate that can never fail and steps down a tenth at a time until the check passes">Suggest: reduce FPS <span id="fpsShown" class="rate"></span></button>
+              <button id="btnFpsMenu" class="split-arrow" title="Thin to a rate of your choosing">▾</button>
+              <div id="fpsMenu" class="menu fps-menu hidden">
+                <p id="fpsSearchNote" class="fps-note"></p>
+                <label for="fpsInput">Or thin to exactly</label>
+                <div class="fps-row">
+                  <input type="text" id="fpsInput" inputmode="decimal" autocomplete="off" spellcheck="false">
+                  <span class="fps-unit">pictures/s</span>
+                  <button id="btnFpsExact" class="small" title="Thin to this rate and check it">thin</button>
+                  <button id="btnFpsSafe" class="small" title="Fill in the fastest rate this profile cannot fail">safe rate</button>
+                </div>
+                <p id="fpsNote" class="fps-note"></p>
+              </div>
+            </span>
+            <label class="sel-only" title="Only let the suggestion touch the frames you have selected"><input type="checkbox" id="suggestSelOnly"> selection only</label>
+          </span>
+          <span class="group">
+            <button id="btnCheck" class="accent" title="Check the current marks now. Every edit is re-checked automatically as well.">Check safety</button>
+            <label class="toggle" title="Re-check the section after every mark change"><input type="checkbox" id="autoCheck" checked> auto-check</label>
+          </span>
+          <span class="group">
+            <button id="btnUndo" class="small" title="Undo the last change to this section's marks (Ctrl+Z)" disabled>↶ undo</button>
+            <button id="btnRedo" class="small" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>↷ redo</button>
+            <button id="btnClearEdits" class="small" title="Take off every R, F, E and B mark in this section. K marks stay (select frames and press U to take those off).">clear all marks</button>
+          </span>
+          <span class="group hidden" id="blendWrap">
+            <label class="toggle" title="How far the frames marked B are blended with the frames either side of them: at 100% a flash is gone (a crossfade between its neighbours); less leaves some of it, and more of what it shows. The check, the section player and the export all use this.">blend <input type="range" id="blendStrength" min="5" max="100" step="5" value="80"> <span id="blendValue" class="rate">80%</span></label>
+            <span id="blendNote" class="rate"></span>
+          </span>
+          <span class="group hidden" id="softenWrap">
+            <label class="toggle" title="Blur the frames where a hazardous stripe pattern was found, just enough to take it under the threshold. The check and the export apply the same blur."><input type="checkbox" id="softenToggle"> soften stripes</label>
+            <span id="softenNote" class="rate"></span>
+          </span>
+        </div>
+        <div class="grid-head">
+          <h3>Frames <span id="frameCount"></span></h3>
+          <span class="size-switch thumb-size" title="Thumbnail size (they are the detector's small copies: view frame shows one at full size)">
+            <button data-thumb="s" class="small">S</button><button data-thumb="m" class="small">M</button><button data-thumb="l" class="small">L</button><button data-thumb="xl" class="small">XL</button>
+          </span>
+          <div class="legend">
+            <span class="chip removed" title="Removed. The badge says which frame shows in its place.">removed</span>
+            <span class="chip extended" title="Held on screen for 1 second">held 1s</span>
+            <span class="chip kept" title="Marked keep: the suggestions never remove or blend it (a subtitle, an image that matters)">keep</span>
+            <span class="chip blended" title="Blended with the frames either side of it (the flash toned down, nothing removed); the thumbnail shows the result">blended</span>
+            <span class="chip flagged">in flash event</span>
+            <span class="chip flagged-red">in red-flash event</span>
+            <span class="chip flagged-ext" title="Inside an extended flash: flashing at the limit rate for 5 seconds or more">in extended flash</span>
+            <span class="chip flagged-pat" title="Inside a hazardous stripe pattern">stripes</span>
+            <span class="chip soft" title="Blurred by the soften-stripes option; the thumbnail shows roughly how much">softened</span>
+            <span class="chip selected">selected</span>
+          </div>
+          <div class="grid-actions">
+            <button id="btnMarkRemoved" class="small" title="Remove the selected frames and show the kept frame before them instead">R: remove, show previous</button>
+            <button id="btnMarkRemovedNext" class="small" title="Remove the selected frames and show the kept frame after them instead">F: remove, show next</button>
+            <button id="btnMarkExtended" class="small">E: hold for 1 second</button>
+            <button id="btnMarkKeep" class="small" title="Keep the selected frames: the suggestions leave them alone">K: keep</button>
+            <button id="btnMarkBlend" class="small" title="Lower the contrast of the selected frames: blend them with the frames either side of them (by the blend strength above), which takes a flash down without taking a frame out">B: blend</button>
+            <button id="btnUnmark" class="small">U: unmark</button>
+            <button id="btnViewFrame" class="small" title="The selected frame at full size, decoded from the file, to read a subtitle or look closer (also Z, or double-click a frame). ← → step through the frames.">view frame (Z)</button>
+            <button id="btnSelectUnsafe" class="small danger hidden" title="Select the frames inside whatever is still failing">select unsafe frames</button>
+          </div>
+        </div>
+        <div class="grid-hint">Click to select · shift-click for everything in between · ctrl-click adds or removes one · Esc clears · <b>double-click</b> (or <b>Z</b>) shows a frame at full size, decoded from the file, to read a subtitle; S to XL above make the thumbnails bigger. <b>R</b> removes a frame and shows the one before it, <b>F</b> shows the one after, <b>E</b> holds a frame for a second, <b>K</b> keeps it out of the suggestions' reach, <b>B</b> blends it with the frames either side (the flash toned down, nothing removed); press the same key again to take the mark off (<b>U</b> clears every mark). <b>Ctrl+Z</b> undoes. Every change is checked as you make it, and <b>▶ play</b> shows it.</div>
+        <div id="frameGrid" class="frame-grid" tabindex="0"></div>
+      </div>
+    </section>
+  </section>
+
+  <section id="welcome">
+    <button id="btnCloseGuide" class="small guide-close" title="Close the guide (Esc)">close guide ✕</button>
+    <div id="newsCard" class="news-card hidden">
+      <h2>What's new since you were last here</h2>
+      <div id="newsList" class="changes-list"></div>
+      <div class="news-actions"><button id="btnNewsSeen" class="small primary">Got it</button><button id="btnNewsAll" class="small">everything that changed</button></div>
+    </div>
+    <h1>Unflash</h1>
+    <p class="lead">Finds the flashing and the stripe patterns in a video that can trigger seizures, and helps you take them out without wrecking the footage. It all runs in this browser: nothing is uploaded.</p>
+    <p class="tour-offer"><button id="btnTour" class="small primary">Take the tour</button><span>a minute's walk round the page</span></p>
+    <div class="guide-screen">
+      <h2>The screen, part by part</h2>
+      <div id="guideParts"></div>
+      <h3>Keys</h3>
+      <table class="keys">
+        <tr><td><kbd>R</kbd> <kbd>F</kbd></td><td>remove the selected frames: the frame before (R) or after (F) shows in their place</td></tr>
+        <tr><td><kbd>E</kbd></td><td>hold a frame on screen a second</td></tr>
+        <tr><td><kbd>K</kbd></td><td>keep: the suggestions leave it alone</td></tr>
+        <tr><td><kbd>B</kbd></td><td>blend with the frames either side</td></tr>
+        <tr><td><kbd>U</kbd></td><td>take every mark off (the same key again takes that one off)</td></tr>
+        <tr><td><kbd>Z</kbd>, double-click</td><td>the frame at full size</td></tr>
+        <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>step through the frames (with Shift, ten at a time)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>undo; with Shift (or <kbd>Ctrl</kbd>+<kbd>Y</kbd>), redo</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>in the frames, select them all</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>close the full-size frame or this guide; clear the selection</td></tr>
+      </table>
+    </div>
+    <ol class="steps">
+      <li><b>Open a video</b>, or drop one on the page. It is scanned, and a numbered <i>section</i> goes round each problem.</li>
+      <li><b>Fix each section</b>: mark frames, or let a <b>Suggest</b> button make a first pass. Every change is checked as you make it.</li>
+      <li><b>Export</b> the fixed video, and <b>verify</b> it.</li>
+    </ol>
+    <p class="disclaimer">It lowers the risk; it can't guarantee safety. Look over what it flags yourself before you share anything.</p>
+    <details id="guideMore" class="guide-more">
+      <summary>The whole guide: marks, suggestions, stripes, auto-fix, extended flashes</summary>
+      <ol>
+        <li><b>Open a video</b> (MP4, MOV, MKV, WebM, or a transport stream: .ts, .m2ts, .mts), or drop one anywhere on the page. It is scanned straight away: every frame is decoded and pushed through the detector as fast as your GPU allows, and Unflash puts a numbered <i>section</i> around every problem it finds.</li>
+        <li><b>Open a section</b> (in the list on the left, or on the timeline). It prepares itself: its frames are decoded so every change can be checked the instant you make it. <b>Mark frames</b>: <b>R</b> removes a frame and shows the one before it in its place, <b>F</b> the one after, <b>E</b> holds a frame for a second, <b>B</b> blends it with the frames either side of it (the flash is toned down, not taken out). Press the same key again to take the mark off. <b>Ctrl+Z</b> undoes.</li>
+        <li><b>Suggest</b> gives you a first pass to work from. <b>Keep dark</b> and <b>keep light</b> remove the frames that make the flashing, <b>fewest removals</b> as few of them as the rules allow (and where a picture would freeze for a while, lets frames back in at a rate that can't flash); <b>blend frames</b> removes nothing: it blends them with the frames around them, which lowers the contrast of the flash from frame to frame, not the picture's (turning the picture itself towards grey would take nearly all of it away before a full-screen flash passed), as little as passes; <b>reduce FPS</b> thins the section, starting at twice the rate that can never fail and stepping down until the check passes. They choose by brightness alone, so look at what they did: they can take out a line of subtitles or an image that matters. Mark such frames <b>K</b> (keep) first and the suggestions work around them.</li>
+        <li><b>Watch it.</b> With a section open, the player plays that section with your marks applied, exactly as the export will render it; switch it to <i>original</i> to compare. It is small and dimmed to begin with (the size buttons and the dim switch are above it).</li>
+        <li><b>Stripe patterns</b> (fine gratings, more than five light–dark pairs, high contrast, a quarter of the screen or more) can't be removed a frame at a time: tick <b>soften stripes</b> and the frames that carry them are blurred just enough, and only where the stripes are.</li>
+        <li><b>Export</b> writes the fixed video (only the stretches around the sections you marked are re-encoded) and <b>Verify</b> scans it again.</li>
+        <li><b>Auto-fix</b> (off unless you tick it in the header) does all of this unattended: the fewest removals, else keep dark, then keep light, then reduce FPS on every section, then the export and its check. Treat what it makes as a starting point; hand editing gives better results.</li>
+        <li><b>Live monitor</b> puts a meter over the player: how much of the picture is flashing on the frame on screen.</li>
+      </ol>
+      <p class="note-extended"><b>Extended flashes</b> are 5 seconds or more of flashing that meets every WCAG failure condition except the rate: it runs <i>at</i> the permitted speed (3 flashes/s) instead of above it. WCAG lets that through, but UK broadcast guidance doesn't and it does affect some viewers, so the default profile flags them as ordinary sections. Pick <i>Exact WCAG only</i> to ignore them. <i>Stricter than WCAG</i> already fails at that speed.</p>
+      <p class="disclaimer">The pattern test covers regular stripes and gratings (the case broadcast guidance names), not every texture that could affect someone, and sensitivity differs from one person to the next.</p>
+    </details>
+    <h2 class="clips-head">Test clips</h2>
+    <p class="clips-intro">Short clips with a known problem each: <b>open</b> loads one, the links download it.</p>
+    <table class="clips">
+      <tr><th>clip</th><th>what's in it</th><th></th><th title="Most browsers decode H.264; Chromium builds without proprietary codecs only VP9. Each clip is 640×360 at 30 fps, with a tone on the sound track, made by tests/media/gen_e2e.py in the repository.">download</th></tr>
+      <tr><td><b>flash</b></td><td title="A slow pan, then 4 flashes a second over the whole picture from 3.0 to 5.5 s and a red flash from 7.0 to 8.5 s: two WCAG failures, one section">4 flashes a second, then a red flash</td><td><button class="small" data-clip="flash.mp4">open</button></td><td><a href="clips/flash.mp4" download>VP9</a> · <a href="clips/flash_h264.mp4" download>H.264</a></td></tr>
+      <tr><td><b>stripes</b></td><td title="The pan, then fine vertical stripes from 2 to 6 s and diagonal ones from 6 to 9 s: no flashing at all, one stripe-pattern section">fine stripes, no flashing</td><td><button class="small" data-clip="stripes.mp4">open</button></td><td><a href="clips/stripes.mp4" download>VP9</a> · <a href="clips/stripes_h264.mp4" download>H.264</a></td></tr>
+      <tr><td><b>extended</b></td><td title="3 flashes a second for 8 s: passes WCAG, flagged as an extended flash by the default profile">3 flashes a second for 8 s</td><td><button class="small" data-clip="extended.mp4">open</button></td><td><a href="clips/extended.mp4" download>VP9</a> · <a href="clips/extended_h264.mp4" download>H.264</a></td></tr>
+      <tr><td><b>redflash</b></td><td title="The pan, then saturated red swapped for a grey of the same brightness 5 times a second from 2 s: no brightness flash at all, one red-flash failure">red against grey, same brightness</td><td><button class="small" data-clip="redflash.mp4">open</button></td><td><a href="clips/redflash.mp4" download>VP9</a> · <a href="clips/redflash_h264.mp4" download>H.264</a></td></tr>
+      <tr><td><b>steady</b></td><td title="The pan alone: nothing to find">nothing to find</td><td><button class="small" data-clip="steady.mp4">open</button></td><td><a href="clips/steady.mp4" download>VP9</a> · <a href="clips/steady_h264.mp4" download>H.264</a></td></tr>
+    </table>
+    <p id="support" class="support"></p>
+  </section>
+</main>
+
+<div id="frameViewer" class="viewer hidden" role="dialog" aria-label="Frame at full size">
+  <div class="viewer-box">
+    <div class="viewer-bar"><span id="viewerInfo"></span><span class="spacer"></span><button id="btnCloseViewer" class="small">close (Esc)</button></div>
+    <canvas id="viewerCanvas"></canvas>
+    <div class="viewer-hint">← → step (shift: ten at a time) · R F E K U mark this frame · Esc closes. Decoded from the file at full size; while you step, a new picture shows at most every 0.4 s, so stepping through flashing does not flash.</div>
+  </div>
+</div>
+
+<div id="exportModal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Export edited video</h2>
+    <div id="exportSummary" class="scrollbox"></div>
+    <label title="The format the video is saved in. Every choice exports the same edits; they differ in where the file plays, how big it is, and whether the parts you did not edit can be copied as they are.">Video format
+      <select id="exportCodec"></select>
+    </label>
+    <p id="exportFormatNote" class="hint"></p>
+    <label title="Higher keeps the re-encoded frames closer to the original and makes a bigger file">Quality <input type="range" id="exportQuality" min="1" max="10" value="7" autocomplete="off"> <span id="exportQualityText">7 of 10</span> <span class="hint">(higher: closer to the original, bigger file)</span></label>
+    <p id="exportPlan" class="hint"></p>
+    <p id="exportSize" class="hint"></p>
+    <label class="export-name" title="The name the export is saved under (an .mp4 file)">Save as <input type="text" id="exportName" spellcheck="false" autocomplete="off"></label>
+    <p id="exportWhere" class="hint"></p>
+    <div class="modal-actions">
+      <button id="btnDoExport" class="primary">Export</button>
+      <button id="btnVerifyExport" disabled>Verify exported file</button>
+      <a id="exportDownload" class="button hidden" download>Download</a>
+      <label class="button small filebtn" title="Check a file you saved earlier, an export of this video say: every frame of it is scanned with the current profile">verify a saved file…<input type="file" id="verifyFileInput" autocomplete="off" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.mkv,.webm" hidden></label>
+      <button id="btnCloseExport" class="small">close</button>
+    </div>
+    <div id="exportResult" class="scrollbox"></div>
+  </div>
+</div>
+
+<div id="changesModal" class="modal hidden">
+  <div class="modal-box changes-box">
+    <h2>What's new in Unflash</h2>
+    <p class="hint">Newest first. The ones marked new came after your last visit.</p>
+    <div id="changesList" class="changes-list scrollbox"></div>
+    <div class="modal-actions"><span class="spacer"></span><button id="btnCloseChanges">Close</button></div>
+  </div>
+</div>
+
+<div id="debugModal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Debug info</h2>
+    <p id="debugNote" class="hint"></p>
+    <textarea id="debugText" class="debug-text" readonly spellcheck="false"></textarea>
+    <div class="modal-actions"><button id="btnDebugCopy" class="primary">Copy</button><a id="btnDebugSave" class="button" download="unflash-debug.txt" href="#">Save as a file</a><span class="spacer"></span><button id="btnCloseDebug">Close</button></div>
+  </div>
+</div>
+
+<footer class="status"><div id="status" class="status-parts"></div><button id="btnDebug" class="small" title="What this browser, its GPU and the open video are, and how long each job took (the last scan step by step), as text to paste into a message to whoever is helping. No file names.">debug info</button></footer>
+<div id="toast" class="toast hidden"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

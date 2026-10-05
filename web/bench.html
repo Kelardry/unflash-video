@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Unflash benchmark</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
+<style>body{font:14px system-ui;background:#15171c;color:#e6e8ee;padding:20px;max-width:900px}pre{background:#1d2027;padding:10px;border-radius:6px;white-space:pre-wrap}button{padding:6px 12px}</style>
+</head>
+<body>
+<h1>Unflash detector benchmark</h1>
+<p>Feeds synthetic flashing frames straight into the detector (no video decoding) and reports the sustained throughput of the WebGPU stage and the CPU (WebAssembly) stage, plus the effective memory traffic. Source: <input id="src" value="1920x1080" size="9"> analysis scale: <input id="scale" value="0.25" size="4"> frames: <input id="n" value="300" size="5"> <button id="run">Run</button></p>
+<pre id="out">…</pre>
+<h2>Built-in H.264 decoder</h2>
+<p>Decodes an H.264 MP4 with the WebAssembly decoder (the path browsers without an H.264 WebCodecs decoder take) and reports the throughput. Clip URL: <input id="clip" value="clips/flash_h264.mp4" size="30"> <button id="runDecode">Run</button></p>
+<pre id="dout">…</pre>
+<script type="module">
+import init, * as wasm from './pkg/unflash.js';
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + '\n'; };
+await init();
+async function bench(kind, cfgJson, w, h, n) {
+  const batch = parseInt(new URLSearchParams(location.search).get('batch') || '16', 10);
+  const det = kind === 'gpu' ? await wasm.Detector.createGpu(cfgJson, w, h, batch) : new wasm.Detector(cfgJson, w, h);
+  const aw = det.analysis_width(), ah = det.analysis_height();
+  // frames at the analysis size for the CPU (its natural input) and at the source size for the GPU
+  const fw = kind === 'gpu' ? w : aw, fh = kind === 'gpu' ? h : ah;
+  const frames = [];
+  for (let k = 0; k < 8; k++) {
+    const f = new Uint8Array(fw * fh * 4);
+    const phase = (k >> 1) & 1;
+    for (let i = 0; i < fw * fh; i++) {
+      const x = i % fw, y = (i / fw) | 0;
+      const inRect = x > fw * 0.2 && x < fw * 0.8 && y > fh * 0.2 && y < fh * 0.8;
+      const c = inRect ? (phase ? 200 : 30) : 60 + ((x * 7 + y * 13 + k) % 17);
+      f[i * 4] = c; f[i * 4 + 1] = c; f[i * 4 + 2] = c; f[i * 4 + 3] = 255;
+    }
+    frames.push(f);
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  // warm up (flush: the GPU stage runs frames in batches, so a lone frame has to be asked for)
+  det.feed_rgba(frames[0], fw, fh, 0, false);
+  det.flush();
+  while (det.pending() > 0) { det.poll(); await tick(); }
+  det.reset();
+  const t0 = performance.now();
+  let busy = 0;
+  for (let i = 0; i < n; i++) {
+    while (!det.can_submit()) { det.poll(); await tick(); }
+    const a = performance.now();
+    det.feed_rgba(frames[i % 8], fw, fh, i / 30, false);
+    busy += performance.now() - a;
+    det.poll();
+  }
+  det.flush();
+  while (det.pending() > 0) { det.poll(); await tick(); }
+  const ms = performance.now() - t0;
+  const res = JSON.parse(det.finish(false));
+  const bpf = det.bytes_per_frame();
+  const fps = n / (ms / 1000);
+  log(`${kind.padEnd(4)} ${w}x${h} -> ${aw}x${ah}: ${n} frames in ${ms.toFixed(0)} ms = ${fps.toFixed(1)} fps, ${(ms / n).toFixed(2)} ms/frame (main thread busy ${(busy / n).toFixed(2)} ms/frame), ≈${(bpf * fps / 1e9).toFixed(2)} GB/s state traffic, ${(aw * ah * fps / 1e6).toFixed(1)} Mpx/s; violations: ${res.violations.length}, held: ${res.held}`);
+  det.free();
+  return { kind, fps, ms, violations: res.violations.length, frames: res.frames };
+}
+window.runBench = async () => {
+  out.textContent = '';
+  const [w, h] = document.getElementById('src').value.split('x').map(Number);
+  const scale = parseFloat(document.getElementById('scale').value);
+  const n = parseInt(document.getElementById('n').value, 10);
+  const cfg = JSON.parse(wasm.profile_config('wcag_ext'));
+  cfg.analysis_scale = scale;
+  const cfgJson = JSON.stringify(cfg);
+  const results = {};
+  if (navigator.gpu) {
+    try { results.gpu = await bench('gpu', cfgJson, w, h, n); } catch (e) { log('gpu: ' + e); }
+  } else log('no WebGPU');
+  results.cpu = await bench('cpu', cfgJson, w, h, n);
+  window.benchResults = results;
+  return results;
+};
+document.getElementById('run').addEventListener('click', runBench);
+const dout = document.getElementById('dout');
+window.runDecodeBench = async (url) => {
+  url = url || document.getElementById('clip').value;
+  dout.textContent = '';
+  const blob = await (await fetch(url)).blob();
+  const file = new File([blob], url.split('/').pop());
+  const { Movie, ChunkReader } = await import('./media.js');
+  const movie = await Movie.open(file, wasm);
+  const desc = movie.dx.track_description(movie.video.index);
+  const info = JSON.parse(wasm.h264_probe(desc));
+  const dec = new wasm.H264Decoder(desc, new URLSearchParams(location.search).has('fast'));
+  const reader = new ChunkReader(file);
+  const { pts, offset, size } = movie.v;
+  const n = pts.length;
+  // read everything first so only decoding is timed
+  const samples = [];
+  for (let i = 0; i < n; i++) samples.push((await reader.read(offset[i], size[i])).slice());
+  const t0 = performance.now();
+  let frames = 0;
+  let bytes = 0;
+  for (let i = 0; i < n; i++) {
+    if (dec.decode(samples[i], pts[i] / 1e6)) {
+      frames++;
+      bytes += dec.frame_len();
+    }
+  }
+  const ms = performance.now() - t0;
+  dec.free();
+  const line = `${file.name}: ${info.width}x${info.height} profile ${info.profile_idc}, ${frames} frames in ${ms.toFixed(0)} ms = ${(frames / (ms / 1000)).toFixed(1)} fps (${(ms / frames).toFixed(2)} ms/frame, ${(bytes / 1e6).toFixed(0)} MB of I420 out)`;
+  dout.textContent += line + '\n';
+  const r = { name: file.name, width: info.width, height: info.height, frames, ms, fps: frames / (ms / 1000) };
+  window.decodeBenchResult = r;
+  return r;
+};
+window.runPoolBench = async (url, workers) => {
+  url = url || document.getElementById('clip').value;
+  const blob = await (await fetch(url)).blob();
+  const file = new File([blob], url.split('/').pop());
+  const { Movie } = await import('./media.js');
+  const { SoftwarePool, defaultWorkerCount } = await import('./h264pool.js');
+  const movie = await Movie.open(file, wasm);
+  const n = workers || defaultWorkerCount();
+  const t0 = performance.now();
+  const pool = await SoftwarePool.create(movie, n);
+  const tInit = performance.now() - t0;
+  const t1 = performance.now();
+  let frames = 0;
+  await pool.decodeRange(0, movie.v.pts.length, -Infinity, Infinity, async (f) => { frames++; f.close(); });
+  const ms = performance.now() - t1;
+  pool.close();
+  const line = `${file.name}: ${n} workers: ${frames} frames in ${ms.toFixed(0)} ms = ${(frames / (ms / 1000)).toFixed(1)} fps (workers started in ${tInit.toFixed(0)} ms)`;
+  dout.textContent += line + '\n';
+  const r = { name: file.name, workers: n, frames, ms, fps: frames / (ms / 1000) };
+  window.poolBenchResult = r;
+  return r;
+};
+document.getElementById('runDecode').addEventListener('click', () => runDecodeBench());
+if (location.hash === '#auto') runBench();
+</script>
+</body>
+</html>

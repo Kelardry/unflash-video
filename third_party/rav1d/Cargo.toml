@@ -1,0 +1,56 @@
+# rav1d 1.1.0 (the Rust port of dav1d), vendored for Unflash's AV1 decoder
+# (crates/unflash-av1). Trimmed to the pure-Rust build and patched to compile
+# for wasm32-unknown-unknown: see UNFLASH.md. The assembly, the build script
+# that assembled it (nasm / cc), the `asm*` features and the upstream profile
+# sections are gone; the workspace root sets the profiles.
+
+[package]
+name = "rav1d"
+version = "1.1.0"
+authors = ["Rav1d Developers", "Prossimo"]
+edition = "2021"
+rust-version = "1.79"
+description = "Rust port of the dav1d AV1 decoder (vendored for Unflash, pure Rust, see UNFLASH.md)"
+readme = "README.md"
+license = "BSD-2-Clause"
+repository = "https://github.com/memorysafety/rav1d"
+publish = false
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+name = "rav1d"
+path = "lib.rs"
+# upstream's own unit tests and doc examples are not Unflash's to run
+test = false
+doctest = false
+
+[features]
+default = ["bitdepth_8", "bitdepth_16"]
+bitdepth_8 = []
+bitdepth_16 = []
+
+[dependencies]
+assert_matches = "1.5.0"
+atomig = { version = "0.4.0", features = ["derive"] }
+bitflags = "2.4.0"
+cfg-if = "1.0.0"
+libc = "0.2"
+parking_lot = "0.12.2"
+paste = "1.0.14"
+strum = { version = "0.26", features = ["derive"] }
+to_method = "1.1.0"
+zerocopy = { version = "0.7.32", features = ["derive"] }
+
+[lints.rust]
+# the sources still test the removed `asm*` features (always off here)
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("asm", "asm_arm64_dotprod", "asm_arm64_i8mm", "asm_arm64_sve2"))'] }
+# upstream code that newer compilers warn about, and helpers only the
+# assembly used; a path dependency's warnings are not capped like a
+# registry crate's, so they would show in every build of the workspace
+dead_code = "allow"
+mismatched_lifetime_syntaxes = "allow"
+unpredictable_function_pointer_comparisons = "allow"

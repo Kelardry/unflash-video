@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# (each version in one place: the cache keys, step names and commands read them)
+env:
+  PLAYWRIGHT_VERSION: "1.56.1"
+  FIREFOX_VERSION: "156.0.1"
+  WASM_BINDGEN_VERSION: "0.2.128"   # must match Cargo.lock
+
+jobs:
+  rust:
+    name: Rust tests (native, software Vulkan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # lavapipe runs the GPU tests; ffmpeg makes the test media and checks the
+      # muxer's output; numpy runs the Python reference. Installed once, then
+      # restored from the cache.
+      - name: System packages (lavapipe, ffmpeg, numpy)
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: mesa-vulkan-drivers vulkan-tools ffmpeg python3-numpy
+          version: 1
+      # the cache restores the packages' files, not what their install scripts
+      # make (the BLAS and LAPACK links ffmpeg and numpy load): made here, or
+      # if anything still fails, the packages installed the slow way
+      - name: System packages work
+        run: |
+          bash .github/cached-packages.sh 'ffmpeg -version && ffprobe -version && python3 -c "import numpy" && vulkaninfo --summary' mesa-vulkan-drivers vulkan-tools ffmpeg python3-numpy
+          ffmpeg -version | head -1
+      - name: Test media
+        run: bash tests/media/gen.sh
+      - name: Reference fixtures are up to date (informational)
+        continue-on-error: true
+        run: |
+          python3 tests/gen_fixtures.py
+          git diff --exit-code -- tests/fixtures
+      - name: cargo test
+        env:
+          UNFLASH_REQUIRE_GPU: "1"
+        run: cargo test --workspace --release
+      - name: Benchmark (informational)
+        timeout-minutes: 15
+        run: cargo run --release -p unflash-gpu --example bench -- 1920x1080 0.25 200
+
+  build:
+    # the WebAssembly and the synthetic clips, made once for every browser part
+    name: Build for the browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web
+      - name: wasm-bindgen (prebuilt, falling back to cargo install)
+        run: |
+          set -e
+          V="$WASM_BINDGEN_VERSION"
+          if curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$V/wasm-bindgen-$V-x86_64-unknown-linux-musl.tar.gz" | tar xz; then
+            sudo install -m 755 "wasm-bindgen-$V-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/
+          else
+            cargo install wasm-bindgen-cli --version "$V" --locked
+          fi
+          wasm-bindgen --version
+      - name: Build
+        run: ./build.sh release
+      # the synthetic clips only change with their generator: kept in the
+      # cache, and made (with ffmpeg and numpy) only when it misses
+      - name: Synthetic videos, from the cache
+        id: clips
+        uses: actions/cache@v4
+        with:
+          path: tests/media/e2e
+          key: e2e-clips-${{ hashFiles('tests/media/gen_e2e.py') }}
+      - name: ffmpeg, numpy (only to make the clips)
+        if: steps.clips.outputs.cache-hit != 'true'
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ffmpeg python3-numpy
+          version: 1
+      # (as in the Rust job)
+      - name: ffmpeg, numpy work
+        if: steps.clips.outputs.cache-hit != 'true'
+        run: |
+          bash .github/cached-packages.sh 'ffmpeg -version && python3 -c "import numpy"' ffmpeg python3-numpy
+          ffmpeg -hide_banner -encoders | grep -E 'libx265|libvpx |libsvtav1|libaom-av1' || true
+      - name: Synthetic videos
+        if: steps.clips.outputs.cache-hit != 'true'
+        run: python3 tests/media/gen_e2e.py
+      # what build.sh makes (the modules, their glue, the page's copy of the
+      # changelog) and the clips, for the parts below
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: |
+            web/pkg/
+            web/pkg-dec/
+            web/CHANGELOG.md
+            tests/media/e2e/
+          if-no-files-found: error
+          retention-days: 3
+      # the app as built, to try or look into
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: web/
+
+  web:
+    # the browser suites in parts, side by side, on the one build (see
+    # tests/e2e/run.mjs --part; `others` runs the suites of their own)
+    name: Browser tests (${{ matrix.part }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [editing, files, gpu, routes, auto, others, firefox]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+      - name: Playwright's Chromium, from the cache
+        if: matrix.part != 'firefox'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium-${{ runner.os }}
+      - name: Playwright
+        if: matrix.part != 'firefox'
+        run: |
+          npm install -g "playwright@$PLAYWRIGHT_VERSION"
+          npx "playwright@$PLAYWRIGHT_VERSION" install chromium
+          # the runner image has Chrome's libraries; fetch them only if the browser won't start
+          node --input-type=module -e "import { loadPlaywright } from './tests/e2e/playwright.mjs'; const { chromium } = await loadPlaywright(); await (await chromium.launch()).close();" || npx "playwright@$PLAYWRIGHT_VERSION" install-deps chromium
+      - name: End-to-end, ${{ matrix.part }} (headless Chromium, WebGPU on SwiftShader)
+        if: matrix.part != 'others' && matrix.part != 'firefox'
+        run: node tests/e2e/run.mjs --part=${{ matrix.part }}
+      # (beside the shortest part)
+      - name: Transport streams, PCM and DTS sound, and the choice of sound track (headless Chromium)
+        if: matrix.part == 'files'
+        run: node tests/e2e/streams.mjs
+      - name: Smart-cut splice, MKV and WebM, the sound of held frames, project files, the guided tour, the page while a job runs, the built-in HEVC, VP9, VP8 and AV1 decoders (headless Chromium), the shrink in WebAssembly, What's new's films, the site as published
+        if: matrix.part == 'others'
+        run: |
+          node tests/e2e/whatsnew-check.mjs
+          node tests/e2e/site.mjs
+          node tests/e2e/splice.mjs
+          node tests/e2e/mkv.mjs
+          node tests/e2e/sound.mjs
+          node tests/e2e/project.mjs
+          node tests/e2e/tour.mjs
+          node tests/e2e/busy.mjs
+          node tests/e2e/decoders.mjs
+          node tests/e2e/shrink.mjs
+      # Firefox: a pinned release, as Mozilla ships it, kept in the cache;
+      # WebGPU on lavapipe; driven over WebDriver BiDi by puppeteer-core
+      - name: Firefox, from the cache
+        if: matrix.part == 'firefox'
+        id: firefox
+        uses: actions/cache@v4
+        with:
+          path: ~/firefox
+          key: firefox-${{ env.FIREFOX_VERSION }}-${{ runner.os }}
+      - name: Firefox ${{ env.FIREFOX_VERSION }}
+        if: matrix.part == 'firefox' && steps.firefox.outputs.cache-hit != 'true'
+        run: curl -fsSL "https://download-installer.cdn.mozilla.net/pub/firefox/releases/$FIREFOX_VERSION/linux-x86_64/en-US/firefox-$FIREFOX_VERSION.tar.xz" | tar xJ -C ~
+      - name: lavapipe (WebGPU for Firefox)
+        if: matrix.part == 'firefox'
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: mesa-vulkan-drivers
+          version: 1
+      - name: puppeteer-core
+        if: matrix.part == 'firefox'
+        run: npm install -g puppeteer-core@25.12.0
+      - name: End-to-end in Firefox (headless, WebGPU on lavapipe)
+        if: matrix.part == 'firefox'
+        run: FIREFOX=~/firefox/firefox node tests/e2e/firefox.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-output-${{ matrix.part }}
+          # (not the copies of the published site site.mjs makes: five of them)
+          path: |
+            tests/e2e/out/
+            !tests/e2e/out/site/
+          if-no-files-found: ignore

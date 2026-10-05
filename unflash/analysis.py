@@ -3,14 +3,18 @@
 Method:
   1. Frames are downscaled to a model of the content viewed at 1024x768
      (analysis_scale of that, default 1/4 => window 341x256 becomes ~85x64).
-  2. Per pixel, sRGB is linearized; relative luminance L and the saturated-red
-     value V = max(0, R-G-B)*320 are tracked through a per-pixel extremum
-     tracker, so a flash ramping over several frames still counts as one
-     transition (accumulated monotonic change, with a small noise deadband).
+  2. Per pixel, sRGB is linearized; relative luminance L and S, the
+     colour's distance from sRGB's red primary in the CIE 1976 UCS diagram
+     (u'v', after a small flare: black has no colour), are tracked through a
+     per-pixel extremum tracker, so a flash ramping over several frames still
+     counts as one transition (accumulated monotonic change, with a small
+     noise deadband). The red run keeps the colour's chromaticity at its two
+     ends.
   3. When a pixel's direction reverses, the completed swing qualifies as a
      luminance transition if |swing| >= swing_threshold and the darker
-     extremum < dark_threshold; as a red transition if |swing| > 20 on the V
-     scale and either extremum was saturated red (R/(R+G+B) >= 0.8).
+     extremum < dark_threshold; as a red transition (WCAG 2.2's working
+     definition) if either end was saturated red (R/(R+G+B) >= 0.8) and the
+     two ends are more than 0.2 apart in u'v'.
   4. Because pixels complete a multi-frame transition at slightly different
      times, completions are pooled over area_accum_window seconds. A frame
      produces a *transition event* (up or down, general or red) when pooled
@@ -81,8 +85,12 @@ MAX_RUN_SECONDS = 2.0
 # So "the same picture" is decided by how much of the picture has moved far
 # enough to be part of a flash: pixels whose luminance differs by more than
 # HELD_DELTA_RATIO of swing_threshold from the last frame that was *not*
-# held. Comparing against the last distinct frame rather than the previous
-# one is what keeps a slow ramp accumulating instead of being held for ever
+# held, or whose distance from red (S) differs by more than HELD_DELTA_RATIO
+# of RED_LEAST_SWING -- a saturated red swapped for a
+# grey of the same luminance moves no luminance at all and is still a new
+# picture (and a red flash). Comparing against the last distinct frame
+# rather than the previous one is what keeps a slow ramp accumulating
+# instead of being held for ever
 # -- but it also means an encoder's drift accumulates, which is why the bar
 # is on magnitude rather than on the tracker's own noise deadband. x264
 # codes the first copy of a new picture roughly and refines it over the
@@ -96,6 +104,58 @@ MAX_RUN_SECONDS = 2.0
 HELD_DELTA_RATIO = 0.5      # of swing_threshold: well under a qualifying
                             # swing, well over anything compression does
 HELD_AREA_RATIO = 0.10      # of the area a flash has to cover
+
+# --- WCAG 2.2's red flash --------------------------------------------------
+# sRGB's red primary in u'v' (from the sRGB-to-XYZ matrix); a state's
+# chromaticity as a run keeps it, u' in 15 bits and v' in 16 (steps of
+# 1/32768 and 1/65536) with the saturated-red flag in the top bit. All of it
+# float32 in the same order as the Rust port (core::lut::red_values).
+RED_U = np.float32(0.4507966)
+RED_V = np.float32(0.5228869)
+QU = np.float32(32768.0)
+QV = np.float32(65536.0)
+SAT_BIT = np.uint32(1 << 31)
+# The least a qualifying red transition moves S: one end saturated (within
+# 0.143 of the red primary), the ends more than 0.2 apart, and the sRGB gamut
+# a 60-degree wedge at the red primary leave it at 0.085 or more. The held
+# test and the window-mean gate are set against it.
+RED_LEAST_SWING = 0.08
+
+
+def red_values(R, G, B, red_saturation, flare):
+    """S (distance from red in u'v') and C (packed chromaticity and
+    saturation) of linear colour planes."""
+    f = np.float32(flare)
+    Rf = R + f
+    Gf = G + f
+    Bf = B + f
+    X = np.float32(0.4124) * Rf + np.float32(0.3576) * Gf + np.float32(0.1805) * Bf
+    Y = np.float32(0.2126) * Rf + np.float32(0.7152) * Gf + np.float32(0.0722) * Bf
+    Z = np.float32(0.0193) * Rf + np.float32(0.1192) * Gf + np.float32(0.9505) * Bf
+    d = X + np.float32(15.0) * Y + np.float32(3.0) * Z
+    u = np.float32(4.0) * X / d
+    v = np.float32(9.0) * Y / d
+    du = u - RED_U
+    dv = v - RED_V
+    S = np.sqrt(du * du + dv * dv)
+    sat = Rf >= np.float32(red_saturation) * (Rf + Gf + Bf)
+    qu = np.minimum(np.floor(u * QU + np.float32(0.5)).astype(np.uint32), np.uint32(0x7fff))
+    qv = np.minimum(np.floor(v * QV + np.float32(0.5)).astype(np.uint32), np.uint32(0xffff))
+    C = (sat.astype(np.uint32) << np.uint32(31)) | (qu << np.uint32(16)) | qv
+    return S.astype(np.float32), C
+
+
+def red_transition(a, b, delta):
+    """Where two packed states make a red transition: either saturated red,
+    and more than `delta` apart in u'v'."""
+    sat = ((a | b) & SAT_BIT) != 0
+    du = (((a >> np.uint32(16)) & np.uint32(0x7fff)).astype(np.float32)
+          - ((b >> np.uint32(16)) & np.uint32(0x7fff)).astype(np.float32)) / QU
+    dv = ((a & np.uint32(0xffff)).astype(np.float32)
+          - (b & np.uint32(0xffff)).astype(np.float32)) / QV
+    dl = np.float32(delta)
+    return sat & ((du * du + dv * dv) > dl * dl)
+
 
 # --- sRGB -> linear lookup table -------------------------------------------
 _LUT = np.empty(256, np.float32)
@@ -458,9 +518,11 @@ class FlashDetector:
                                        ah - self.wh)).astype(int)
         gshape = (len(self.gys), len(self.gxs))
         self.mean_swing = max(0.02, cfg.swing_threshold * cfg.area_fraction)
-        self.mean_swing_red = cfg.red_delta_threshold * cfg.area_fraction
+        # (a window whose area share of pixels made the least qualifying red
+        # swing; in float32, as the port computes it)
+        self.mean_swing_red = float(np.float32(RED_LEAST_SWING) * np.float32(cfg.area_fraction))
         self.mtrack_gen = _ExtremaTracker(self.mean_swing * 0.3)
-        self.mtrack_red = _ExtremaTracker(self.mean_swing_red * 0.3)
+        self.mtrack_red = _ExtremaTracker(float(np.float32(self.mean_swing_red) * np.float32(0.3)))
         self.mflash_gen = _FlashCounter(gshape, cfg.flash_limit)
         self.mflash_red = _FlashCounter(gshape, cfg.flash_limit)
         # extended flashes run one step below the failure rate: "more than
@@ -492,10 +554,12 @@ class FlashDetector:
         self._clock = 0.0
         self._recent_dt = []
         self._prev_L = None     # luminance of the last frame not held
+        self._prev_V = None     # its distance from red (S)
         self.held = 0           # frames that only repeated the picture
         # what makes a frame a new picture rather than a re-show of the last
         # one: this much of it moved this far (see HELD_DELTA_RATIO)
         self._held_delta = HELD_DELTA_RATIO * cfg.swing_threshold
+        self._held_delta_v = float(np.float32(HELD_DELTA_RATIO) * np.float32(RED_LEAST_SWING))
         self._held_bar = max(1.0, HELD_AREA_RATIO * self.area_thresh)
 
     def _window_sums(self, arr):
@@ -548,8 +612,14 @@ class FlashDetector:
         # The clock still advances: the picture really was on screen for
         # that long, and the time it occupies has to count against the
         # sustained-flashing windows like any other quiet moment.
+        # A picture is a repeat only if neither its luminance nor its red
+        # value moved: a saturated red swapped for a grey of the same
+        # luminance is a new picture (and a red flash) although no pixel
+        # changed luminance.
+        V, C = red_values(R, G, B, cfg.red_saturation, cfg.red_flare)
         if self._prev_L is not None and np.count_nonzero(
-                np.abs(L - self._prev_L) > self._held_delta
+                (np.abs(L - self._prev_L) > self._held_delta)
+                | (np.abs(V - self._prev_V) > self._held_delta_v)
                 ) < self._held_bar:
             self.held += 1
             # the runs still age: time passes while a picture is held, and a
@@ -573,9 +643,7 @@ class FlashDetector:
         # compared against the last frame that was not held, so a drift too
         # slow to trip the bar in one step still trips it eventually
         self._prev_L = L
-        total = R + G + B
-        sat = (total > 1e-5) & (R >= cfg.red_saturation * total)
-        V = np.maximum(R - G - B, 0.0) * 320.0
+        self._prev_V = V
 
         rev_up, rev_dn, base, ext, _, _ = self.lum.feed(L, tc)
         # upward run: base is darker end; downward run: ext is darker end
@@ -584,14 +652,14 @@ class FlashDetector:
         q_dn = rev_dn & ((base - ext) >= cfg.swing_threshold) & \
             (ext < cfg.dark_threshold)
 
-        r_up, r_dn, rbase, rext, raux_b, raux_e = self.red.feed(V, tc, aux=sat)
-        # the transition must go INTO or OUT OF saturated red (the states at
-        # the two ends of the swing differ). Brightness wobble within a
-        # continuously-red scene changes V but is not a red flash — genuine
-        # red<->dark luminance flashing is caught by the general criterion.
-        sat_changed = raux_b != raux_e
-        rq_up = r_up & ((rext - rbase) > cfg.red_delta_threshold) & sat_changed
-        rq_dn = r_dn & ((rbase - rext) > cfg.red_delta_threshold) & sat_changed
+        r_up, r_dn, rbase, rext, raux_b, raux_e = self.red.feed(V, tc, aux=C)
+        # WCAG 2.2: to or from saturated red, the two states more than 0.2
+        # apart in u'v'. Brightness wobble within a red scene keeps its
+        # chromaticity and is no red flash (red<->dark red flashing is caught
+        # by the general criterion, as a luminance flash).
+        red_q = red_transition(raux_b, raux_e, cfg.red_delta_threshold)
+        rq_up = r_up & red_q
+        rq_dn = r_dn & red_q
 
         # --- coherence gate: window-mean flash tracking ---------------------
         npix = self.ww * self.wh
@@ -860,8 +928,15 @@ class FlashDetector:
             runs = [(min(float(be[k]), e) - max(float(ab[k]), s),
                      max(float(ab[k]), s)) for k in range(i0, i1)]
             peaks.append(max(runs)[1] if runs else s)
+        # The lit spans run on for the hold after each hit, which is how hits
+        # a second apart join up; the flashing itself stops at the last hit.
+        # Reported to the hold's end, flashing that stops where a section
+        # begins reads as a second of that section's own.
+        hits = tc[hit]
+        last = [max(float(hits[max(int(np.searchsorted(hits, m[1], side="right")), 1) - 1]), m[0])
+                for m in merged]
         starts = self._to_native(np.array([m[0] for m in merged]))
-        ends = self._to_native(np.array([m[1] for m in merged]))
+        ends = self._to_native(np.array(last))
         pk = self._to_native(np.array(peaks))
         return [Violation(float(a), float(b), "extended", m[2],
                           onset=float(a), peak=float(p))

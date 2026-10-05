@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/unflash-av1",
+    "crates/unflash-core",
+    "crates/unflash-decoders",
+    "crates/unflash-gpu",
+    "crates/unflash-h264",
+    "crates/unflash-hevc",
+    "crates/unflash-mp4",
+    "crates/unflash-sound",
+    "crates/unflash-vp8",
+    "crates/unflash-vp9",
+    "crates/unflash-wasm",
+    # rav1d (the Rust port of dav1d), vendored for unflash-av1: see its UNFLASH.md
+    "third_party/rav1d",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/l1n/unflash-video"
+
+[workspace.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "std"] }
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+# Fast-ish tests for the GPU crate on a software Vulkan driver.
+[profile.dev.package."*"]
+opt-level = 2
+
+# "*" is the dependencies, not the members: rav1d is one. Unoptimised, and
+# with its debug-only borrow checking (DisjointMut), it takes many minutes
+# over the AV1 decoder's tests.
+[profile.dev.package.rav1d]
+opt-level = 2
+debug-assertions = false

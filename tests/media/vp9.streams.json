@@ -1,0 +1,22 @@
+{
+    "programs": [
+
+    ],
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "vp9",
+            "codec_type": "video",
+            "codec_tag_string": "vp09",
+            "width": 64,
+            "height": 48,
+            "time_base": "1/15360",
+            "start_time": "0.000000",
+            "duration": "2.000000",
+            "nb_frames": "60"
+        }
+    ],
+    "format": {
+        "duration": "2.000000"
+    }
+}

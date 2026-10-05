@@ -1,0 +1,23 @@
+[package]
+name = "unflash-gpu"
+description = "WebGPU (wgpu) compute pipeline for the Unflash flash detector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+unflash-core = { path = "../unflash-core" }
+bytemuck.workspace = true
+log.workspace = true
+wgpu = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { workspace = true, features = ["vulkan", "gles", "metal", "dx12"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, features = ["webgpu"] }
+
+[dev-dependencies]
+pollster = "0.4"
+env_logger = "0.11"

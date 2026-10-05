@@ -1,0 +1,32 @@
+{
+    "programs": [
+
+    ],
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "h264",
+            "codec_type": "video",
+            "codec_tag_string": "avc1",
+            "width": 64,
+            "height": 48,
+            "time_base": "1/15360",
+            "start_time": "0.066667",
+            "duration": "2.000000"
+        },
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "codec_tag_string": "mp4a",
+            "sample_rate": "48000",
+            "channels": 1,
+            "time_base": "1/48000",
+            "start_time": "0.000000",
+            "duration": "2.066667"
+        }
+    ],
+    "format": {
+        "duration": "2.066667"
+    }
+}

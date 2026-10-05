@@ -1,0 +1,17 @@
+[package]
+name = "unflash-hevc"
+version = "0.1.0"
+edition = "2021"
+description = "A small HEVC / H.265 decoder (Main, Main 10 and Main Still Picture, 4:2:0) for browsers without one"
+license = "MIT"
+
+[dependencies]
+wide = { version = "0.7", optional = true }
+
+[dev-dependencies]
+unflash-mp4 = { path = "../unflash-mp4" }
+md5 = "0.7"
+
+[features]
+default = ["simd"]
+simd = ["dep:wide"]

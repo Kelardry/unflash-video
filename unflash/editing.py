@@ -770,7 +770,7 @@ def suggest_edits(project, sid, prefer="light", only=None, job=None):
                            context=ctx)
         seq = edited_sequence(rel_pts, ed, ext_s)
         inside, after, _, _ = _classify(r, seq[-1][0] if seq else 0.0,
-                                        ctx.next_at)
+                                        ctx.next_at, cfg.area_accum_window)
         r.violations = inside + after
         return r
 
@@ -996,7 +996,7 @@ def suggest_frame_rate(project, sid, only=None, fps=None, job=None):
                             context=ctx)
     seq = edited_sequence(rel_pts, edits, ext_s)
     inside, after, _, _ = _classify(result, seq[-1][0] if seq else 0.0,
-                                    ctx.next_at)
+                                    ctx.next_at, cfg.area_accum_window)
     result.violations = inside + after
 
     pool = [i for i in range(n)
@@ -1151,7 +1151,8 @@ def analyze_rendered_section(project, sid, path):
     for t, fr in zip(ctx.tail_pts, ctx.tail):
         det.feed(end + t, np.ascontiguousarray(fr))
     result = det.finish()
-    inside, after, _, _ = _classify(result, end + dt * 0.5, ctx.next_at)
+    inside, after, _, _ = _classify(result, end + dt * 0.5, ctx.next_at,
+                                    cfg.area_accum_window)
     result.violations = inside + after
     # the frames behind the failure, so a render verdict can be acted on in
     # the grid exactly like a check verdict
@@ -1164,7 +1165,7 @@ def analyze_rendered_section(project, sid, path):
     return result, after
 
 
-def _classify(result, end_disp, next_at=None):
+def _classify(result, end_disp, next_at=None, boundary=0.0):
     """Split a context-aware simulation's violations by where they land.
 
     Anything finished before the section's first frame belongs to earlier
@@ -1183,12 +1184,24 @@ def _classify(result, end_disp, next_at=None):
     blames a section for flashing that begins after its last frame merely
     because the reach crosses the boundary, and then offers its final
     frames as the ones to remove -- frames that have nothing to do with it.
+
+    Flashing that runs up to the section's first frame reaches into it by
+    the change into its first picture, which completes one more flash when
+    that picture differs enough from the last one before it, and a flash
+    completed counts for `boundary` seconds after (the detector's pooling
+    window, area_accum_window). The section has to start with some picture
+    of its own, so a flash or an extended flash already flashing before it
+    that reaches no further than that is the run-up's, not something its
+    edits can clear. (A pattern is on the frames that show it: one reaching
+    the section is on its frames.)
     """
     inside, after, elsewhere, before = [], [], [], []
     for v in result.violations:
         if v.kind == "extended" and not result.flag_extended:
             continue
-        if v.end < -1e-6:
+        run_up = (v.kind != "pattern" and v.start < -1e-6
+                  and v.end <= boundary + 1e-6)
+        if v.end < -1e-6 or run_up:
             before.append(v)
         elif v.start > end_disp + 1e-6:
             (elsewhere
@@ -1225,7 +1238,8 @@ def check_section(project, sid, edits=None):
 
     seq = edited_sequence(rel_pts, use_edits, ext_s)
     end_disp = seq[-1][0] if seq else 0.0
-    inside, after, elsewhere, _ = _classify(result, end_disp, ctx.next_at)
+    inside, after, elsewhere, _ = _classify(result, end_disp, ctx.next_at,
+                                            cfg.area_accum_window)
     result.violations = inside + after
 
     verdict = result.to_dict()

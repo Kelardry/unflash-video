@@ -1,0 +1,22 @@
+{
+    "programs": [
+
+    ],
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "av1",
+            "codec_type": "video",
+            "codec_tag_string": "av01",
+            "width": 64,
+            "height": 48,
+            "time_base": "1/15360",
+            "start_time": "0.000000",
+            "duration": "1.000000",
+            "nb_frames": "30"
+        }
+    ],
+    "format": {
+        "duration": "1.000000"
+    }
+}

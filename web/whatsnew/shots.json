@@ -1,0 +1,966 @@
+{
+ "alerts": {
+  "w": 720,
+  "h": 450,
+  "seconds": 9.1,
+  "alt": "Alerts, in the header: a beep when a job that ran over a minute finishes, a system notification too if you like, and a button to try the beep.",
+  "sha256": "846635b258386fbf060c81f826a0f2393d2b1f1cda39857e4a4b2f57b2b50df1",
+  "checked": {
+   "profile": "strict",
+   "frames": 274,
+   "violations": 0
+  }
+ },
+ "auto-fix": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.7,
+  "alt": "Auto-fix ticked, a video opened: it is scanned, every section fixed, the result exported and checked, with no clicks; then it can be downloaded.",
+  "sha256": "74e0474089b39f83ed89e3f25214c1405f0c4882f14d95ed83be044da97522f9",
+  "checked": {
+   "profile": "strict",
+   "frames": 322,
+   "violations": 0
+  }
+ },
+ "auto-fix-off": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.9,
+  "alt": "Auto-fix, in the header, is off. A video is opened: its scan starts by itself; a section clicked prepares itself; nothing is fixed until asked.",
+  "sha256": "3a51e795feed7e7e9e6d40a694276f1eb74284170fbeb74e0318c87cb02be809",
+  "checked": {
+   "profile": "strict",
+   "frames": 358,
+   "violations": 0
+  }
+ },
+ "background-tab": {
+  "w": 720,
+  "h": 450,
+  "seconds": 19.4,
+  "alt": "A scan starts, and another tab comes to the front for a while; back on Unflash's tab, the scan has gone on without it.",
+  "sha256": "533502da7f64b03369303cab6b6df4317d6b243ffa45d15ea12ae207c4ff4f8f",
+  "checked": {
+   "profile": "strict",
+   "frames": 583,
+   "violations": 0
+  }
+ },
+ "blend-frames": {
+  "w": 720,
+  "h": 450,
+  "seconds": 17.8,
+  "alt": "Suggest: blend frames on a failing section: the flashing frames are blended with their neighbours (marked B), nothing is removed, the blend slider appears and the section passes. A double-click shows one of them at full size.",
+  "sha256": "825bf0cda2f2b363f8cf9bd993a4e9c5b10265e77432cb11b68178a8980bd4a7",
+  "checked": {
+   "profile": "strict",
+   "frames": 535,
+   "violations": 0
+  }
+ },
+ "blend-marks": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.5,
+  "alt": "Frames selected and marked B: blended with the frames either side instead of removed. The blend slider appears and sets how far; the check follows it.",
+  "sha256": "af04279410fcd46f9af8118149ff3bcd4d173dc327a7274b49eb11e09ee06006",
+  "checked": {
+   "profile": "strict",
+   "frames": 437,
+   "violations": 0
+  }
+ },
+ "calm-player": {
+  "w": 720,
+  "h": 450,
+  "seconds": 16.8,
+  "alt": "A fixed section plays: a dim bar moves along the frames at most every 0.4 s, and the live meter's bars fall back slowly. The dim switch turns the thumbnails and the player up, then down again.",
+  "sha256": "f061719e6d0a88204d306c4e5276962b09bf3ec97539d0ae4eea3c9120efef6f",
+  "checked": {
+   "profile": "strict",
+   "frames": 506,
+   "violations": 0
+  }
+ },
+ "cancel": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.9,
+  "alt": "A failing section of 247 frames is prepared again, and the job cancelled halfway: Unflash says it was cancelled, and the section keeps its 247 frames and its verdict.",
+  "sha256": "0b25bb046587494c4d99353dea98be91124ad682af7fc25715cbeb6d5659c00b",
+  "checked": {
+   "profile": "strict",
+   "frames": 358,
+   "violations": 0
+  }
+ },
+ "clean-scan": {
+  "w": 720,
+  "h": 450,
+  "seconds": 6.4,
+  "alt": "A video with no flashing is scanned: \"No flashing found\", under the chart and in the sections list, with how close it came to the limit.",
+  "sha256": "3caba73f453195e00ada7e8c528aafe5d549437b798ef85d94bd32f784617141",
+  "checked": {
+   "profile": "strict",
+   "frames": 193,
+   "violations": 0
+  }
+ },
+ "debug-info": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.2,
+  "alt": "Debug info, bottom right, opens a plain-text report of the browser, its GPU, the video and how long each job took, ready to copy into a message.",
+  "sha256": "906189f17bf8287e6aa1ab378181251e12249bce89e3740b7af151902cde3446",
+  "checked": {
+   "profile": "strict",
+   "frames": 308,
+   "violations": 0
+  }
+ },
+ "decode-workers": {
+  "w": 720,
+  "h": 450,
+  "seconds": 18,
+  "alt": "The same 1080p scan in Firefox twice: above, decoded on the page; below, decoded in the background, several pictures at once, and done sooner.",
+  "sha256": "e7d27e50d6f1d385b6878000188216535a30fbb032ee20c4dcba17b0a58973c3",
+  "checked": {
+   "profile": "strict",
+   "frames": 542,
+   "violations": 0
+  }
+ },
+ "dolby-sound": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.2,
+  "alt": "A video whose sound is E-AC-3 (Dolby Digital Plus), which this browser can't decode: sound off is clicked, and the section plays with its sound (a steady tone), decoded by Unflash itself, as the debug report then says. The film has its sound: turn it on with the film's own sound button.",
+  "sound": true,
+  "sha256": "4744ea99fe96e94bf4411fca6775ac79a0c46110abc16bc5d53cddd4e458388e",
+  "checked": {
+   "profile": "strict",
+   "frames": 427,
+   "violations": 0
+  }
+ },
+ "drop": {
+  "w": 720,
+  "h": 450,
+  "seconds": 7.7,
+  "alt": "A video file dragged onto the page and dropped: it opens, and its scan starts.",
+  "sha256": "639fd68fc04550ec19b17a3fe0abea0ee70d04cc93016dfe98c9610f853b307e",
+  "checked": {
+   "profile": "strict",
+   "frames": 232,
+   "violations": 0
+  }
+ },
+ "dts-sound": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.4,
+  "alt": "A video whose sound is DTS, which no browser decodes for a web page: sound off is clicked, and the section plays with its sound (a steady tone), decoded by Unflash itself, as the debug report then says. The film has its sound: turn it on with the film's own sound button.",
+  "sound": true,
+  "sha256": "e22936e0755af8e2bbbc5815d021ae2300c43e480fd591f6fd467fe23bb38a96",
+  "checked": {
+   "profile": "strict",
+   "frames": 464,
+   "violations": 0
+  }
+ },
+ "exact-chunks": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.4,
+  "alt": "The same minute of video scanned twice, in one go above and in pieces below: the pieces are taken in the film's order, and both end with exactly the same sections.",
+  "sha256": "26f68c74ba7006178c6927589b34e98d2108f0ea999457d823279c76b4994c24",
+  "checked": {
+   "profile": "strict",
+   "frames": 312,
+   "violations": 0
+  }
+ },
+ "export-formats": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.2,
+  "alt": "The export dialog offers one choice per format, and says where each plays and whether the parts not edited are copied as they are.",
+  "sha256": "695c44c3496ec9770e3d4775b0e87c11d83f452c9796797ad6cb85a034b9bf39",
+  "checked": {
+   "profile": "strict",
+   "frames": 367,
+   "violations": 0
+  }
+ },
+ "export-kept": {
+  "w": 720,
+  "h": 450,
+  "seconds": 16.7,
+  "alt": "In Firefox, a section fixed and exported; the page is reloaded and the same video opened again; the export dialog has the export still there, ready to download or verify, and Verify checks it.",
+  "sha256": "886eb378eb83eb318a51246b7ff65c8f87d9d0fbdfdf358003218c59503e99f8",
+  "checked": {
+   "profile": "strict",
+   "frames": 503,
+   "violations": 0
+  }
+ },
+ "fewest": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.4,
+  "alt": "Suggest: keep dark removes the dark frames of a section; undone, Suggest: fewest removals fixes it by removing fewer.",
+  "sha256": "f93ce4b7a0e283a6172c1106d8ce03a8177abf46c4a851a89023e02489ec663a",
+  "checked": {
+   "profile": "strict",
+   "frames": 463,
+   "violations": 0
+  }
+ },
+ "fewest-verdict": {
+  "w": 720,
+  "h": 450,
+  "seconds": 13.9,
+  "alt": "A section of bursts of quick flashes, each of which fails by itself: Suggest: fewest removals takes every burst out, and says the section passes, which the verdict now says too (it showed the check of the last burst tried back in, which fails).",
+  "sha256": "9963a6f37f6aea965dea26410eafc874727280fe2acd0a3b6f318ea139f3f00e",
+  "checked": {
+   "profile": "strict",
+   "frames": 419,
+   "violations": 0
+  }
+ },
+ "films": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.9,
+  "alt": "What's new, a film beside each change: the one in view plays by itself, muted; a click pauses it, and another plays it again.",
+  "sha256": "33c7b3ef554d2df9c970597fa59a23218ff877c98dcff054b4f4b7949ee249d8",
+  "checked": {
+   "profile": "strict",
+   "frames": 478,
+   "violations": 0
+  }
+ },
+ "findings": {
+  "w": 720,
+  "h": 450,
+  "seconds": 8.7,
+  "alt": "A section with an extended flash lists it, with its frames and times and how to fix it; \"select these frames\" selects them, and the frames inside the extended flash have a blue outline.",
+  "sha256": "aa17a82e1c529dfb0dfc9b6ee05ba01c38ca1e9187df859eca1db025b33a4df7",
+  "checked": {
+   "profile": "strict",
+   "frames": 260,
+   "violations": 0
+  }
+ },
+ "firefox-lanes": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.8,
+  "alt": "In Firefox, a two-minute H.264 film is scanned in chunks; the debug report then says how: a lane of Firefox's decoder beside Unflash's own, and how far apart the film's keyframes are.",
+  "sha256": "92c17f0b89722785e611064e6a03851339ea908ee9bd10e7272de69ea4480481",
+  "checked": {
+   "profile": "strict",
+   "frames": 446,
+   "violations": 0
+  }
+ },
+ "firefox-works": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.2,
+  "alt": "In Firefox: Scan is clicked, and the scan runs to the end on the GPU, the flashing marked on the timeline as it is found.",
+  "sha256": "31c7e4eb61f1ab7f7edb46fb5de9e1fcc28a49afefb1ddc0497097558f61b75d",
+  "checked": {
+   "profile": "strict",
+   "frames": 456,
+   "violations": 0
+  }
+ },
+ "fragmented": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.4,
+  "alt": "A recording whose index is spread through the file in fragments opens; the debug report says it is fragmented.",
+  "sha256": "1a8302f5fb1d871a317bc3a90d0cdb18b1eeddf886ce976d4736f08bfd553fa4",
+  "checked": {
+   "profile": "strict",
+   "frames": 372,
+   "violations": 0
+  }
+ },
+ "frame-times": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.5,
+  "alt": "A section 50 seconds into a video: the verdict and the list under it say when the flash is in the whole video and how far into the section; then each frame in the grid shows its time in the whole video at the top right, and how far into the section it is at the bottom right.",
+  "sha256": "121d8e0c2fe59768253a54d4c017457bba57792e7744b3aaac31472aa92cd0ae",
+  "checked": {
+   "profile": "strict",
+   "frames": 466,
+   "violations": 0
+  }
+ },
+ "gpu-batches": {
+  "w": 720,
+  "h": 450,
+  "seconds": 20.1,
+  "alt": "In Firefox, a scan on the GPU; the debug report shows the batches of frames sent to the GPU and how long it took to answer.",
+  "sha256": "0ba046b4cb71f75347c57bc3eebc3ff931369db7cc589d5babe6f1b65760047c",
+  "checked": {
+   "profile": "strict",
+   "frames": 605,
+   "violations": 0
+  }
+ },
+ "guide-beside": {
+  "w": 720,
+  "h": 450,
+  "seconds": 7,
+  "alt": "With a video open, Guide opens the guide beside the work instead of over it; Esc puts it away.",
+  "sha256": "7c0c13a30bbee61d164162f831427944e5c4bd45e7a5ccd885121a8a67d373fb",
+  "checked": {
+   "profile": "strict",
+   "frames": 212,
+   "violations": 0
+  }
+ },
+ "guide-parts": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.1,
+  "alt": "With a section open, the guide opens beside it at \"The screen, part by part\"; \"show me\" beside Frames closes the guide and lights up the frames on the page, with a card that says what they are for.",
+  "sha256": "8740e7814652e19d47d8df1703cd3d66da8e5041ec35ddf62c931239b7599c73",
+  "checked": {
+   "profile": "strict",
+   "frames": 335,
+   "violations": 0
+  }
+ },
+ "h264-builtin": {
+  "w": 720,
+  "h": 450,
+  "seconds": 21.2,
+  "alt": "An H.264 film opens in a browser without an H.264 decoder of its own: Unflash says it decodes it itself, and the scan finds the flashing; an interlaced one opens too.",
+  "sha256": "815188715f67ed19ef4c676d766cf7ab839332305493c0a09af2136bbf6aad92",
+  "checked": {
+   "profile": "strict",
+   "frames": 636,
+   "violations": 0
+  }
+ },
+ "h264-exact": {
+  "w": 720,
+  "h": 450,
+  "seconds": 6.5,
+  "alt": "The same H.264 film scanned in Firefox twice: above with Firefox's decoder, below with Unflash's own; both find exactly the same.",
+  "sha256": "831ae9869d3e84c43c8d3821a1d24bc9b734f583813c8c6d12e29805dfb834f3",
+  "checked": {
+   "profile": "strict",
+   "frames": 196,
+   "violations": 0
+  }
+ },
+ "h264-faster": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.3,
+  "alt": "A 1080p H.264 film scanned with Unflash's own H.264 decoder, in several workers; the debug report shows the time it took per picture.",
+  "sha256": "f334f5d21ff602d23b4887be07ce79950c336ff849a995949d8314c4fe68c616",
+  "checked": {
+   "profile": "strict",
+   "frames": 311,
+   "violations": 0
+  }
+ },
+ "held-silence": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.4,
+  "alt": "A frame is marked E (held a second); the export dialog then says the sound is re-encoded to put silence under the held frame, where the picture waits.",
+  "sha256": "9d90121c6ec66cd0126b6d305c3c692715095a04825245668da08d47846c45a2",
+  "checked": {
+   "profile": "strict",
+   "frames": 314,
+   "violations": 0
+  }
+ },
+ "hevc": {
+  "w": 720,
+  "h": 450,
+  "seconds": 13.4,
+  "alt": "An HEVC film opens in a browser that cannot decode HEVC: Unflash says it uses its own HEVC decoder, and the scan finds the flashing.",
+  "sha256": "4bfbb45429ccf2681399fefb42c59da217415859a0932f17da7414e30afb8373",
+  "checked": {
+   "profile": "strict",
+   "frames": 404,
+   "violations": 0
+  }
+ },
+ "job-steps": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.7,
+  "alt": "In Firefox, a six-hour MKV opens (it keeps no index, so the file is read through); the debug report says how long the opening took and where the time went.",
+  "sha256": "c0c1123b85494d277f7cec3f9b654c75d96b19223028a857c3b1620b4bd64a6b",
+  "checked": {
+   "profile": "strict",
+   "frames": 442,
+   "violations": 0
+  }
+ },
+ "joined-ts": {
+  "w": 720,
+  "h": 450,
+  "seconds": 17.9,
+  "alt": "A transport stream made of two recordings joined end to end, the second with its clock an hour back: it opens at 0:00, twenty seconds long, and the scan marks the flashing in both halves on the timeline.",
+  "sha256": "037b14f0ab1f230a74dd7a84fecdeeb7c55404b017a00729300c881287ae6a60",
+  "checked": {
+   "profile": "strict",
+   "frames": 539,
+   "violations": 0
+  }
+ },
+ "keys": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.6,
+  "alt": "Marking frames with the keys, as in the original tool: R removes, R again takes it off, F, E and K mark, U clears; Ctrl+Z undoes and Ctrl+Shift+Z redoes.",
+  "sha256": "03fee9dd4a8e5c725114279cae069b2af972696bb814457daf1fb6a815ab696e",
+  "checked": {
+   "profile": "strict",
+   "frames": 469,
+   "violations": 0
+  }
+ },
+ "likeliest-first": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14,
+  "alt": "A scan of a film whose flashing is near its end: before the scan gets there, the places the file's index suggests are looked at first, and what they hold is marked on the timeline, dashed.",
+  "sha256": "695dead2067e36d13e925591a9030fc83ec27fef04898db22615677bbdbc7f61",
+  "checked": {
+   "profile": "strict",
+   "frames": 422,
+   "violations": 0
+  }
+ },
+ "live-monitor": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.9,
+  "alt": "The live monitor, over the player, reads the finished scan: clicking the timeline at the flashing shows how much of the picture flashes there.",
+  "sha256": "f4d8b4533e9e0c556a1d311c1c776f65ea6cc5919915f42156b0053a953f5202",
+  "checked": {
+   "profile": "strict",
+   "frames": 330,
+   "violations": 0
+  }
+ },
+ "marks-kept": {
+  "w": 720,
+  "h": 450,
+  "seconds": 20.7,
+  "alt": "A frame of a failing section is selected and Suggest: blend frames started; while it runs, R marks the frame for removal. The suggestion is not applied: Unflash says the marks changed while it ran, and the frame keeps its R.",
+  "sha256": "389ccaec1155f62f1c2d4e63383ad7705212a377023105f473cca18833f9c80e",
+  "checked": {
+   "profile": "strict",
+   "frames": 623,
+   "violations": 0
+  }
+ },
+ "memory": {
+  "w": 720,
+  "h": 450,
+  "seconds": 16.7,
+  "alt": "A ten-minute film scanned in a browser without WebGPU, the tab's memory measured by the browser as it goes: it stays the same from start to end.",
+  "sha256": "11640b5327c8766d320cf83ff6392eb2c9d555457d883ca75a502bc54c3531b1",
+  "checked": {
+   "profile": "strict",
+   "frames": 502,
+   "violations": 0
+  }
+ },
+ "mkv": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.2,
+  "alt": "An MKV file opens and is scanned like an MP4; an AVI is recognised, and Unflash says how to convert it.",
+  "sha256": "4289c8c99f6aa18a73e7e54f293c5a57737a9ac62d02d4d0dcd3ee99da7a9514",
+  "checked": {
+   "profile": "strict",
+   "frames": 456,
+   "violations": 0
+  }
+ },
+ "new-version": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.8,
+  "alt": "A page open while a newer version of Unflash is published: it says so, once, and new version: reload stays in the header until the page is reloaded; until then the page carries on as it is, on its own version's files.",
+  "sha256": "94626281234bbdee451ed1d5652f998105bfe7ae3842837ae73cbaa518e4e5e5",
+  "checked": {
+   "profile": "strict",
+   "frames": 355,
+   "violations": 0
+  }
+ },
+ "no-adapter": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.5,
+  "alt": "A browser whose WebGPU gives the page no graphics adapter (hardware acceleration off, say): a video is opened, and the message says in words that the scans run on the CPU, with the same results, and what to look at in Chrome: Settings, System, Use graphics acceleration when available, and chrome://gpu. The debug report keeps the browser's own error.",
+  "sha256": "75170c821600335b5ec0943052d15808c36c2fde81ccbeed2d529599723f099a",
+  "checked": {
+   "profile": "strict",
+   "frames": 377,
+   "violations": 0
+  }
+ },
+ "no-freeze": {
+  "w": 720,
+  "h": 450,
+  "seconds": 9.7,
+  "alt": "Suggest: fewest removals on a long stretch of flashing: some frames are let back in at a rate that cannot flash, so the picture does not freeze, and the section passes.",
+  "sha256": "54104c4f737d2497cd9684d921c68cb93a2a6f786721af8c69daae408323e01c",
+  "checked": {
+   "profile": "strict",
+   "frames": 292,
+   "violations": 0
+  }
+ },
+ "pcm-sound": {
+  "w": 720,
+  "h": 450,
+  "seconds": 16.1,
+  "alt": "A video whose sound is uncompressed (24-bit PCM in a MOV, as cameras record it): sound off is clicked, and the section plays with its sound (a steady tone), read by Unflash itself, as the debug report then says. The film has its sound: turn it on with the film's own sound button.",
+  "sound": true,
+  "sha256": "8f574fff639ee3663b28046638ba64fb67167a3313052e575910b61d5a341045",
+  "checked": {
+   "profile": "strict",
+   "frames": 486,
+   "violations": 0
+  }
+ },
+ "plainer-look": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15.8,
+  "alt": "The look: keys that light up when they are on, grey around the picture, colour kept for what it means. A failing section's verdict is lit red; after a Suggest, green. Sound off lights up as sound on.",
+  "sha256": "aa92ae9d5e81cfd9606cfe2f9b9a0754cdcca4b56aa21aeb2e4786005698bb5e",
+  "checked": {
+   "profile": "strict",
+   "frames": 475,
+   "violations": 0
+  }
+ },
+ "prepare-faster": {
+  "w": 720,
+  "h": 450,
+  "seconds": 13.1,
+  "alt": "A section opens and prepares: its frames are decoded in several pieces at once, and it is checked.",
+  "sha256": "afad0cd41cde05225ad1c34e1822906dcd0e23c7160c75de77a51cd867ca5ec5",
+  "checked": {
+   "profile": "strict",
+   "frames": 394,
+   "violations": 0
+  }
+ },
+ "profile-wait": {
+  "w": 720,
+  "h": 450,
+  "seconds": 19.8,
+  "alt": "During a scan, another profile is picked: Unflash says the scan is under way and to change the profile once it has finished, the choice goes back to the profile the scan runs under, and the scan goes on to the end.",
+  "sha256": "bd1eb47c2b9714bd1747af55a786ae5b129c254491480c1cee6f65e0839abcee",
+  "checked": {
+   "profile": "strict",
+   "frames": 595,
+   "violations": 0
+  }
+ },
+ "project-files": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.3,
+  "alt": "Project…, in the header: the sections, marks and scan are saved to a file, then loaded back from it.",
+  "sha256": "1f9273f5f573257c190149d7b03f5ac28a2c55cc1240f517e8660f76d361f552",
+  "checked": {
+   "profile": "strict",
+   "frames": 341,
+   "violations": 0
+  }
+ },
+ "quality-scale": {
+  "w": 720,
+  "h": 450,
+  "seconds": 20.3,
+  "alt": "In Firefox, the export dialog's quality says 7 of 10; it is moved to 10 of 10 and the page reloaded; with the video open again, the dialog says 7 of 10, with the slider at 7 (Firefox used to put the slider back at 10 and leave the number at 7).",
+  "sha256": "4dc4f974bd4e807f5160472e37c711f56146d7558fb65f1bc45adc5b6e5eb179",
+  "checked": {
+   "profile": "strict",
+   "frames": 611,
+   "violations": 0
+  }
+ },
+ "read-once": {
+  "w": 720,
+  "h": 450,
+  "seconds": 17.9,
+  "alt": "A video opened and scanned straight away; the debug report shows how little time opening it took.",
+  "sha256": "e6c4e8f3879990531e3a9fb26263dbf63f229ad8d7f4cf1577a2a4f382cefa7c",
+  "checked": {
+   "profile": "strict",
+   "frames": 538,
+   "violations": 0
+  }
+ },
+ "rebalance": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.7,
+  "alt": "The same 1080p H.264 scan in Firefox twice, Firefox's lanes as slow as on a Windows PC: above, the chunks handed out in turn, and taken over when a slow lane holds one up; below, each chunk to the lane that would finish it first, the slow lanes set aside and Unflash's decoder grown into their cores, and the scan ends sooner.",
+  "sha256": "aa46f5e1740b5b163ba0887798b61167b70441ea5879853be18ced6b1f3c8442",
+  "checked": {
+   "profile": "strict",
+   "frames": 442,
+   "violations": 0
+  }
+ },
+ "red-same-brightness": {
+  "w": 720,
+  "h": 450,
+  "seconds": 8.4,
+  "alt": "Saturated red swapped with a grey just as bright, five times a second: no brightness flash at all, but the scan finds a red flash, and its frames are marked in magenta.",
+  "sha256": "f176533b3fedbee1f070d547c94e9d93268c1b16b9b58cc4ed4474fc7f9053f7",
+  "checked": {
+   "profile": "strict",
+   "frames": 254,
+   "violations": 0
+  }
+ },
+ "red-wcag22": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.2,
+  "alt": "A red flash (saturated red against grey) found by a scan, judged as WCAG 2.2 has it; its section lists the red flash and marks its frames in magenta.",
+  "sha256": "77b6de47940b60bdacc3db81cc98cde8e61e110215fe5b1ddb3e8a7a10faae92",
+  "checked": {
+   "profile": "strict",
+   "frames": 306,
+   "violations": 0
+  }
+ },
+ "responsive": {
+  "w": 720,
+  "h": 450,
+  "seconds": 19.7,
+  "alt": "In Firefox, during a scan: the guide opens and closes, and the chart answers the pointer, while the scan goes on.",
+  "sha256": "e5e93c13b7d374036389739ec2e3e5d736c7f4a37cbab0128f3fa0fbb149b5f6",
+  "checked": {
+   "profile": "strict",
+   "frames": 593,
+   "violations": 0
+  }
+ },
+ "run-up": {
+  "w": 720,
+  "h": 450,
+  "seconds": 8.4,
+  "alt": "Section #3 begins where an extended flash in section #2 ends. Fixed, #3 passes, and its list says the flashing just before it is section #2's, with a button that opens #2, where the extended flash is.",
+  "sha256": "d4f214fb394e23531dc964ad233a1cbb746ae62f99e81c213f2cbaccc3e73857",
+  "checked": {
+   "profile": "strict",
+   "frames": 254,
+   "violations": 0
+  }
+ },
+ "save-as": {
+  "w": 720,
+  "h": 450,
+  "seconds": 19.5,
+  "alt": "In Firefox, the export dialog: Save as has the video's name with .unflashed, and a new name is typed in its place; under it, how to have Firefox ask which folder to save in (its setting Always ask you where to save files). Export writes the video, and Download offers it under the new name.",
+  "sha256": "4a1267ffe31cd017c338d4d56bde0a539ce93a63640fca59ed9dff48ed2ab719",
+  "checked": {
+   "profile": "strict",
+   "frames": 584,
+   "violations": 0
+  }
+ },
+ "scan-parts": {
+  "w": 720,
+  "h": 450,
+  "seconds": 20.9,
+  "alt": "In Firefox, a one-minute film scanned on the GPU; the debug report shows it cut into chunks and decoded by two lanes at once, with what each lane did.",
+  "sha256": "fb45c11409cf2f0948750abf36c4255897e44e3ddf766253df5a125e932261b0",
+  "checked": {
+   "profile": "strict",
+   "frames": 628,
+   "violations": 0
+  }
+ },
+ "scan-twice": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.7,
+  "alt": "A scan under way. Scan is clicked again: a note says a scan is under way, and the scan goes on to the end and marks the flashing on the timeline.",
+  "sha256": "42dd5d246e1875a0194585eb7750e8cc75458be70ade64d80453fa376396b6b6",
+  "checked": {
+   "profile": "strict",
+   "frames": 382,
+   "violations": 0
+  }
+ },
+ "section-player": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.9,
+  "alt": "The section player plays a fixed section as the export will write it, looping, at half speed; the line above it says what is on screen and whether it passes.",
+  "sha256": "3ea8f910a63e9023c684ced349b501684dc184af2eb73a92f252c344f4e8209f",
+  "checked": {
+   "profile": "strict",
+   "frames": 329,
+   "violations": 0
+  }
+ },
+ "section-sound": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.8,
+  "alt": "Sound off, under the section player, is clicked and lights up as sound on; the fixed section plays with its sound (a steady tone), silent for the second a held frame waits. The film has its sound: turn it on with the film's own sound button.",
+  "sound": true,
+  "sha256": "f0f7b58ad17bc3c3e7ba522f940d7555834b6e69c9bd0bfa2a12b803761206d0",
+  "checked": {
+   "profile": "strict",
+   "frames": 325,
+   "violations": 0
+  }
+ },
+ "shrink-faster": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.6,
+  "alt": "In Firefox, a 1080p film scanned; the debug report shows the pictures made small in the workers, a few milliseconds each.",
+  "sha256": "1f04a7ea0be368e76ed27f062da4a8e8c7f1ba7161c349680c4e997820792ade",
+  "checked": {
+   "profile": "strict",
+   "frames": 349,
+   "violations": 0
+  }
+ },
+ "shrink-in-workers": {
+  "w": 720,
+  "h": 450,
+  "seconds": 16.7,
+  "alt": "The same 1080p scan in Firefox twice: above, every picture reaches the page at full size; below, the workers make it small first, and the scan ends sooner.",
+  "sha256": "a2b445a2e944f3345c994c9abcf2baad3a9137033965c3fe6134350c7f69903b",
+  "checked": {
+   "profile": "strict",
+   "frames": 504,
+   "violations": 0
+  }
+ },
+ "smart-cut": {
+  "w": 720,
+  "h": 450,
+  "seconds": 27.6,
+  "alt": "The export dialog says only the stretches around the sections are decoded and re-encoded, the rest copied as it is; the export runs and is checked.",
+  "sha256": "5cd2756d31b1038769797356ce58c39a515628de04322422b734e1c8232189de",
+  "checked": {
+   "profile": "strict",
+   "frames": 829,
+   "violations": 0
+  }
+ },
+ "sound-says": {
+  "w": 720,
+  "h": 450,
+  "seconds": 11.8,
+  "alt": "The section player's sound is turned on: at ½× its button says sound at 1× only; back at 1×, ▶ plays the section, and in this browser, which can't decode AAC, the button says no sound, and a note says which sound it couldn't decode.",
+  "sha256": "2151f3766837783b2371e707847e0deafb093990cbafa7d1f7e44225e53ba4a2",
+  "checked": {
+   "profile": "strict",
+   "frames": 354,
+   "violations": 0
+  }
+ },
+ "sound-track": {
+  "w": 720,
+  "h": 450,
+  "seconds": 17.8,
+  "alt": "A video with two sound tracks, the first in a form no browser plays (ALAC): Unflash takes the second, and the line under the player says so (sound 2 of 2); the export keeps that track, and says why.",
+  "sha256": "a64ee638d132e53d40cde4a672a2b3efb9723fb95b32e79d661d335b8ab9a34d",
+  "checked": {
+   "profile": "strict",
+   "frames": 534,
+   "violations": 0
+  }
+ },
+ "start-page": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.9,
+  "alt": "The start page as someone coming back sees it: what is new as headlines, one opened to the rest; three short steps; and the whole guide folded underneath, opened.",
+  "sha256": "1be194c9ef5f8250b81cd26d5d24d8b15002e9ae4ce9ee71407d75f70e812f5d",
+  "checked": {
+   "profile": "strict",
+   "frames": 386,
+   "violations": 0
+  }
+ },
+ "stripes": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.3,
+  "alt": "The stripes test clip opened from the start page: the scan finds a stripe pattern; in its section, soften stripes blurs them just enough, and the section passes.",
+  "sha256": "ba62f0ccfed4b3268231383407aab48969e39f4578f1792731350ca1879aeaa0",
+  "checked": {
+   "profile": "strict",
+   "frames": 431,
+   "violations": 0
+  }
+ },
+ "take-over": {
+  "w": 720,
+  "h": 450,
+  "seconds": 18.5,
+  "alt": "The same scan in Firefox twice, its lanes as slow as on a Windows PC: above, the scan waits on each slow lane; below, an idle lane takes over the stretch the scan waits for, and it ends sooner.",
+  "sha256": "fd491c894e6de58960a74e5156e9408704773d16c7122f9d0f5e870bb689b761",
+  "checked": {
+   "profile": "strict",
+   "frames": 557,
+   "violations": 0
+  }
+ },
+ "thumbs-zoom": {
+  "w": 720,
+  "h": 450,
+  "seconds": 14.3,
+  "alt": "The thumbnails in four sizes, S to XL; Z shows the selected frame at full size, and the arrow keys step through the frames, a new picture at most every 0.4 s.",
+  "sha256": "a262baa4a9e88c50cfab35070ac5567e091f7edca83a71d9e5c3d1e4ab56fd8d",
+  "checked": {
+   "profile": "strict",
+   "frames": 431,
+   "violations": 0
+  }
+ },
+ "timeline-redraw": {
+  "w": 720,
+  "h": 450,
+  "seconds": 13.7,
+  "alt": "A ten-minute film scanned: the timeline shows what the scan has found so far all the way through, without holding it up.",
+  "sha256": "4a818771a68e4884d4f1a43ec0d74fff2cc290b28a743fa39732347cdf3945f9",
+  "checked": {
+   "profile": "strict",
+   "frames": 412,
+   "violations": 0
+  }
+ },
+ "tour": {
+  "w": 720,
+  "h": 450,
+  "seconds": 16.1,
+  "alt": "A first visit: the tour starts on the start page and walks through it, step by step, a light on each part with a card beside it.",
+  "sha256": "bf80c6518077f9a327a11b95301132d4da9e67ae4fe197b19cdb6610529578da",
+  "checked": {
+   "profile": "strict",
+   "frames": 484,
+   "violations": 0
+  }
+ },
+ "transport-streams": {
+  "w": 720,
+  "h": 450,
+  "seconds": 15,
+  "alt": "A Blu-ray .m2ts file opens: Unflash reads it through (a transport stream keeps no index), and the line under the player names its H.264 and AC-3; the scan finds its two flashes, as in the MP4 it was made from.",
+  "sha256": "031292b5e92723b61f2588de03dcec6d6cabb7e02869ee94f05de0cdaf0bf1ed",
+  "checked": {
+   "profile": "strict",
+   "frames": 451,
+   "violations": 0
+  }
+ },
+ "two-decoders": {
+  "w": 720,
+  "h": 450,
+  "seconds": 13.1,
+  "alt": "In Firefox, a two-minute H.264 film is scanned by two decoders at once, Firefox's and Unflash's; the debug report shows what each did.",
+  "sha256": "869d4bedc1f38740a66086528ce818c097255ee189852d73c79be75185b5205c",
+  "checked": {
+   "profile": "strict",
+   "frames": 395,
+   "violations": 0
+  }
+ },
+ "unmarked-copied": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.4,
+  "alt": "A one-minute film with two sections prepared: the first fixed, the second opened and left as it was. The export dialog's plan re-encodes one span, around the first, and copies every other frame, the second section's included.",
+  "sha256": "9bcc3c4a0fd45c3fc1ed72e43046ba8b613ad1b057e072b098096aed7b58ed58",
+  "checked": {
+   "profile": "strict",
+   "frames": 314,
+   "violations": 0
+  }
+ },
+ "verify-sections": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.6,
+  "alt": "An export whose check still finds flashing: Verify says which section each problem is in, and a click on section #1 opens it with the frames that were on screen during the flash selected.",
+  "sha256": "80d11763391907772c4157765b5e8021d6d7e649c66795cf6860e602ffd83f60",
+  "checked": {
+   "profile": "strict",
+   "frames": 378,
+   "violations": 0
+  }
+ },
+ "web-version": {
+  "w": 720,
+  "h": 450,
+  "seconds": 19.6,
+  "alt": "Unflash in the browser, start to end: a video opened and scanned, its section fixed with a Suggest button, the result exported and checked.",
+  "sha256": "df5d8a9bc7efe70ac909160dc86b0471dbe28eca0e0d3fc927638b36d51b8d5d",
+  "checked": {
+   "profile": "strict",
+   "frames": 589,
+   "violations": 0
+  }
+ },
+ "whats-new": {
+  "w": 720,
+  "h": 450,
+  "seconds": 12.5,
+  "alt": "Someone back after an update: the changes since their visit wait on the start page, and What's new, in the header, has them all, the new ones marked, each with its film.",
+  "sha256": "a3d07679ec94b25fe76a0ee3a4d1bed4c1346cef77bfde6f4879d737ade3051a",
+  "checked": {
+   "profile": "strict",
+   "frames": 378,
+   "violations": 0
+  }
+ },
+ "whole-video": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.7,
+  "alt": "From a section, Whole video at the top of the list charts the whole video around the playhead: 10 s, 30 s or all of it, and the pointer on the chart reads out its numbers.",
+  "sha256": "139ad7432263cb02aeeabbae6cf433a77849d61c3a2462c3459d0433aff1cf65",
+  "checked": {
+   "profile": "strict",
+   "frames": 323,
+   "violations": 0
+  }
+ },
+ "yuv-planes": {
+  "w": 720,
+  "h": 450,
+  "seconds": 10.4,
+  "alt": "A scan on the GPU whose pictures go to it as the video's own colour planes: the debug report says \"yuv (I420…)\". Filmed in Chromium, made to take that route, as the Firefox here decodes to BGRX and has no planes to send.",
+  "sha256": "5b06cf6e0520b88318068d349ebf70ffa7c8fd79b25ee503a0db2e0039b75e31",
+  "checked": {
+   "profile": "strict",
+   "frames": 313,
+   "violations": 0
+  }
+ }
+}

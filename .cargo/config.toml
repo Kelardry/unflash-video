@@ -1,0 +1,3 @@
+# SIMD128 for the browser build; wasm-bindgen-rayon is not used, so no atomics.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

@@ -1,0 +1,96 @@
+# Build the WebAssembly modules and publish the site made from web/ to GitHub
+# Pages (site.mjs: each build's code in a folder of its own).
+#
+# Runs on every push to main and on demand (Actions tab -> Pages -> Run
+# workflow, from any branch). The first run enables Pages for the repository
+# with the "GitHub Actions" source; if that step is refused, enable it once
+# under Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+name: Pages
+
+on:
+  push:
+    branches:
+      - main
+      # temporary, so the site is live before the branch is merged; remove after merging
+      - claude/wasm-rust-webgpu-realtime-cex8qj
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  WASM_BINDGEN_VERSION: "0.2.128"   # must match Cargo.lock
+  BINARYEN_VERSION: version_123
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen (prebuilt, falling back to cargo install)
+        run: |
+          set -e
+          V="$WASM_BINDGEN_VERSION"
+          if curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$V/wasm-bindgen-$V-x86_64-unknown-linux-musl.tar.gz" | tar xz; then
+            sudo install -m 755 "wasm-bindgen-$V-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/
+          else
+            cargo install wasm-bindgen-cli --version "$V" --locked
+          fi
+          wasm-bindgen --version
+      - name: wasm-opt (optional)
+        run: |
+          V="$BINARYEN_VERSION"
+          if curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/$V/binaryen-$V-x86_64-linux.tar.gz" | tar xz; then
+            sudo install -m 755 "binaryen-$V/bin/wasm-opt" /usr/local/bin/
+            wasm-opt --version
+          else
+            echo "binaryen not available; shipping the unoptimised module"
+          fi
+      - name: Build
+        run: ./build.sh release
+      - name: Test clips (ffmpeg, numpy)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-numpy
+          python3 tests/media/gen_e2e.py web/clips
+          ls -la web/clips
+      - id: pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: How to enable Pages
+        if: failure() && steps.pages.outcome == 'failure'
+        run: |
+          echo "::error::GitHub Pages is not enabled for this repository and the workflow token may not enable it."
+          echo "::error::Enable it once: Settings -> Pages -> Build and deployment -> Source: 'GitHub Actions', then re-run this workflow."
+      # each build's code in a folder of its own (v/<build>/), so that a page
+      # only ever loads its own build's files; the builds replaced in the last
+      # three days stay, copied from the site as it is, for the pages still
+      # open on them (site.mjs)
+      - name: The site
+        run: node site.mjs _site --keep-from "${{ steps.pages.outputs.base_url }}/"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

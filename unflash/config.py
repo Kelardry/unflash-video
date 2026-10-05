@@ -3,8 +3,9 @@
 WCAG 2.x / PEAT reference thresholds:
   - general flash: pair of opposing relative-luminance changes >= 0.10 of max,
     darker state < 0.80, covering >= 1/4 of any 341x256 window at 1024x768
-  - red flash: pair of opposing transitions where either state has
-    R/(R+G+B) >= 0.8 and |delta (R-G-B)*320| > 20
+  - red flash (WCAG 2.2, and 2.1 as now published): pair of opposing
+    transitions, each to or from a state with R/(R+G+B) >= 0.8, whose states
+    are more than 0.2 apart in the CIE 1976 UCS diagram (u'v')
   - failure: more than 3 flashes (of either kind) in any 1-second period
   - extended flash: >= 5 s of flashing that meets every failure criterion
     except the rate — it runs *at* the permitted rate (flash_limit per
@@ -39,8 +40,16 @@ class DetectorConfig:
     dark_threshold: float = 0.80         # darker state must be below this
     area_fraction: float = 0.25          # of the 341x256 window
     flash_limit: float = 3.0             # fail when flashes/s > limit
-    red_delta_threshold: float = 20.0    # on (R-G-B)*320 scale
+    red_delta_threshold: float = 0.2     # u'v' distance between the states
+                                         # of a red transition (WCAG 2.2)
     red_saturation: float = 0.80         # R/(R+G+B)
+    red_flare: float = 0.0035            # share of white added to every
+                                         # channel before a colour's
+                                         # chromaticity is taken: a screen's
+                                         # black is never black, and black has
+                                         # no chromaticity. 0.0035 makes pure
+                                         # red count against black from where
+                                         # WCAG 2.0's formula counts it
     # --- extended flash ---
     # Same detector as a failure (swing, dark state, area, concurrency and
     # window-mean coherence) at flash_limit flashes/s instead of above it,
@@ -60,7 +69,9 @@ class DetectorConfig:
     window_h: int = 256
     analysis_scale: float = 0.25         # model resolution multiplier
     noise_eps: float = 0.02              # deadband for luminance extrema
-    red_noise_eps: float = 4.0           # deadband on the 0..320 red scale
+    red_noise_eps: float = 0.04          # deadband on the distance from red
+                                         # in u'v' (a qualifying red
+                                         # transition moves it 0.085 at least)
     area_accum_window: float = 0.125     # seconds to pool transition area
                                          # (a flash ramping over several frames
                                          # completes per-pixel at slightly
